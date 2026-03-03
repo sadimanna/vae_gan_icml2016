@@ -1,0 +1,24 @@
+# Large data directories
+outputs/
+data/
+cifar-10-batches-py/
+cifar-10-python.tar.gz
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+venv/
+env/
+.env
+activate.sh
