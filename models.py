@@ -62,26 +62,33 @@ class Encoder(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self, nz, ngf, nc, ngpu=1):
+    def __init__(self, nz, ngf, nc, ngpu=1, image_size=32):
         super(Generator, self).__init__()
         self.ngpu = ngpu
-        # DCGAN generator blocks (matches dcgan.py)
-        self.main = nn.Sequential(
-            nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False),
-            nn.BatchNorm2d(ngf * 8),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ngf * 4),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ngf * 2),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(ngf * 2, ngf, 4, 2, 1, bias=False),
-            nn.BatchNorm2d(ngf),
-            nn.ReLU(True),
-            nn.ConvTranspose2d(ngf, nc, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.Tanh()
-        )
+        n = math.log2(image_size)
+        assert n == round(n), 'imageSize must be a power of 2'
+        assert n >= 3, 'imageSize must be at least 8'
+        n = int(n)
+
+        # DCGAN-style generator built dynamically to match image size
+        self.main = nn.Sequential()
+        # initial 4x4 block
+        start_ch = ngf * 2 ** (n - 3)
+        self.main.add_module('tconv0', nn.ConvTranspose2d(nz, start_ch, 4, 1, 0, bias=False))
+        self.main.add_module('tbn0', nn.BatchNorm2d(start_ch))
+        self.main.add_module('trelu0', nn.ReLU(True))
+
+        # upsample blocks to reach image_size
+        for i in range(n - 2):
+            in_ch = ngf * 2 ** (n - 3 - i)
+            is_last = (i == n - 3)
+            out_ch = nc if is_last else ngf * 2 ** (n - 4 - i)
+            self.main.add_module('tconv%d' % (i + 1), nn.ConvTranspose2d(in_ch, out_ch, 4, 2, 1, bias=False))
+            if is_last:
+                self.main.add_module('tanh', nn.Tanh())
+            else:
+                self.main.add_module('tbn%d' % (i + 1), nn.BatchNorm2d(out_ch))
+                self.main.add_module('trelu%d' % (i + 1), nn.ReLU(True))
 
     def forward(self, input_x):
         if isinstance(input_x.data, torch.cuda.FloatTensor) and self.ngpu > 1:

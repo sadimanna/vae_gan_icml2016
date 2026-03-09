@@ -55,7 +55,7 @@ def main():
     nc = 3
     encoder = Encoder(opt.imageSize, opt.nz, opt.ngf, nc)
     sampler = Sampler()
-    netG = Generator(opt.nz, opt.ngf, nc, opt.ngpu)
+    netG = Generator(opt.nz, opt.ngf, nc, opt.ngpu, image_size=opt.imageSize)
 
     encoder.apply(weights_init)
     netG.apply(weights_init)
