@@ -40,15 +40,32 @@ def main():
     parser = build_parser()
     opt = parser.parse_args()
 
-    run_dir = setup_output_dir(opt.outf)
+    run_dir = setup_output_dir(opt.outf, run_format='%d:%m:%Y_%H:%M:%S')
     logger = setup_logger(run_dir)
     logger.info(opt)
     opt.outf = run_dir
 
-    set_seed(opt, logger)
+    mps_available = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+    if opt.cuda:
+        if torch.cuda.is_available():
+            opt.device = torch.device('cuda')
+        elif mps_available:
+            opt.device = torch.device('mps')
+            logger.warning('CUDA requested but not available; using MPS instead.')
+        else:
+            opt.device = torch.device('cpu')
+            logger.warning('CUDA requested but not available; using CPU.')
+    else:
+        if mps_available:
+            opt.device = torch.device('mps')
+            logger.info('Using MPS because CUDA is not available.')
+        else:
+            opt.device = torch.device('cpu')
+            if torch.cuda.is_available():
+                logger.warning('You have a CUDA device, so you should probably run with --cuda')
+    opt.cuda = opt.device.type == 'cuda'
 
-    if torch.cuda.is_available() and not opt.cuda:
-        logger.warning('You have a CUDA device, so you should probably run with --cuda')
+    set_seed(opt, logger)
 
     dataloader = build_dataloader(opt)
 

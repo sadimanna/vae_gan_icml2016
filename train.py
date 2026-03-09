@@ -18,22 +18,26 @@ class Trainer:
         self.criterion = nn.BCELoss()
         self.mse_criterion = nn.MSELoss()
 
-        self.input_x = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
-        self.noise = torch.FloatTensor(opt.batchSize, opt.nz, 1, 1)
-        self.fixed_noise = torch.FloatTensor(opt.batchSize, opt.nz, 1, 1).normal_(0, 1)
-        self.label = torch.FloatTensor(opt.batchSize)
+        self.device = getattr(
+            opt,
+            'device',
+            torch.device('cuda' if opt.cuda and torch.cuda.is_available() else 'cpu'),
+        )
+
+        self.input_x = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize).to(self.device)
+        self.noise = torch.FloatTensor(opt.batchSize, opt.nz, 1, 1).to(self.device)
+        self.fixed_noise = torch.FloatTensor(opt.batchSize, opt.nz, 1, 1).normal_(0, 1).to(self.device)
+        self.label = torch.FloatTensor(opt.batchSize).to(self.device)
         self.real_label = 1
         self.fake_label = 0
 
-        if opt.cuda:
-            self.netD.cuda()
-            self.netG.cuda()
-            self.encoder.cuda()
-            self.sampler.cuda()
-            self.criterion.cuda()
-            self.mse_criterion.cuda()
-            self.input_x, self.label = self.input_x.cuda(), self.label.cuda()
-            self.noise, self.fixed_noise = self.noise.cuda(), self.fixed_noise.cuda()
+        if self.device.type != 'cpu':
+            self.netD.to(self.device)
+            self.netG.to(self.device)
+            self.encoder.to(self.device)
+            self.sampler.to(self.device)
+            self.criterion.to(self.device)
+            self.mse_criterion.to(self.device)
 
         self.input_x = Variable(self.input_x)
         self.label = Variable(self.label)
@@ -76,8 +80,9 @@ class Trainer:
                 # train with real
                 self.netD.zero_grad()
                 real_cpu, _ = data
-                batch_size = real_cpu.size(0)
-                self.input_x.data.resize_(real_cpu.size()).copy_(real_cpu)
+                real = real_cpu.to(self.device)
+                batch_size = real.size(0)
+                self.input_x.data.resize_(real.size()).copy_(real)
                 #################################
                 # Dis(x)
                 self.label.data.resize_(real_cpu.size(0)).fill_(self.real_label)

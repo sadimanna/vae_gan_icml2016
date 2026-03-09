@@ -7,13 +7,15 @@ import torch
 import torch.backends.cudnn as cudnn
 
 
-def setup_output_dir(base_outf):
+def setup_output_dir(base_outf, run_format=None):
     try:
         os.makedirs(base_outf)
     except OSError:
         pass
 
-    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    if run_format is None:
+        run_format = '%Y%m%d_%H%M%S'
+    ts = datetime.datetime.now().strftime(run_format)
     run_dir = os.path.join(base_outf, 'run_%s' % ts)
     try:
         os.makedirs(run_dir)
