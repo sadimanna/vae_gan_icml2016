@@ -49,6 +49,22 @@ class Trainer:
         self.prevDLoss = None
         self.prevGLoss = None
 
+    def _feature_mse(self, feats_a, feats_b):
+        losses = []
+        for feat_a, feat_b in zip(feats_a, feats_b):
+            losses.append(self.mse_criterion(feat_a, feat_b))
+        if len(losses) == 1:
+            return losses[0]
+        return sum(losses) / len(losses)
+
+    def _recon_loss(self, rec, rec_feats):
+        if rec_feats:
+            _, real_feats = self.netD(self.input_x)
+            if not real_feats:
+                return self.mse_criterion(rec, self.input_x)
+            return self._feature_mse(rec_feats, real_feats)
+        return self.mse_criterion(rec, self.input_x)
+
     def train(self, dataloader):
         opt = self.opt
         for epoch in range(opt.niter):
@@ -64,7 +80,7 @@ class Trainer:
                 #################################
                 # Dis(x)
                 self.label.data.resize_(real_cpu.size(0)).fill_(self.real_label)
-                output = self.netD(self.input_x)
+                output, _ = self.netD(self.input_x)
                 errD_real = self.criterion(output, self.label.view(-1, 1))
                 D_x = output.data.mean()
                 # train with fake - Dis(Dec(z))
@@ -72,14 +88,14 @@ class Trainer:
                 self.noise.data.normal_(0, 1)
                 gen = self.netG(self.noise)
                 self.label.data.fill_(self.fake_label)
-                output = self.netD(gen.detach())
+                output, _ = self.netD(gen.detach())
                 errD_fake = self.criterion(output, self.label.view(-1, 1))
                 D_G_z1 = output.data.mean()
                 # train with reconstructed (encoded->sampled->decoded) -- Dis(Dec(Enc(x)))
                 encoded = self.encoder(self.input_x)
                 sampled = self.sampler(encoded)
                 rec = self.netG(sampled)  # ------------------------> Reconstruction
-                output = self.netD(rec.detach())
+                output, _ = self.netD(rec.detach())
                 errD_rec = self.criterion(output, self.label.view(-1, 1))
                 D_G_z_rec = output.data.mean()
                 errD = errD_real + errD_fake + errD_rec
@@ -98,17 +114,21 @@ class Trainer:
                 gen = self.netG(self.noise)
                 ######### Rec part ###########
                 self.label.data.fill_(self.fake_label)
-                output = self.netD(gen)
+                output, _ = self.netD(gen)
                 errG_fake = self.criterion(output, self.label.view(-1, 1))
                 D_G_z1 = output.data.mean()
                 # reconstruct via encoder->sampler->generator
                 encoded = self.encoder(self.input_x)
                 sampled = self.sampler(encoded)
                 rec = self.netG(sampled)
-                output = self.netD(rec)
+                output, rec_feats = self.netD(rec)
                 errG_adv = self.criterion(output, self.label.view(-1, 1))
                 # add reconstruction loss to generator training
-                MSEerr_G = self.mse_criterion(rec, self.input_x)
+                if self.netD.hook_layers:
+                    _, input_feats = self.netD(self.input_x)
+                    MSEerr_G = self._recon_loss(input_feats, rec_feats)
+                else:
+                    MSEerr_G = self.mse_criterion(rec, self.input_x)
                 errG = -errG_fake - errG_adv + opt.gamma * MSEerr_G
                 errG.backward()
                 D_G_z2 = output.data.mean()
@@ -126,7 +146,11 @@ class Trainer:
                 KLD_loss = torch.sum(KLD_element).mul_(-0.5)
                 sampled = self.sampler(encoded)
                 rec = self.netG(sampled)
-                MSEerr = self.mse_criterion(rec, self.input_x)
+                if self.netD.hook_layers:
+                    _, input_feats = self.netD(self.input_x)
+                    MSEerr = self._recon_loss(input_feats, rec_feats)
+                else:
+                    MSEerr = self.mse_criterion(rec, self.input_x)
                 VAEerr = opt.kld_wt * KLD_loss + MSEerr
                 VAEerr.backward()
                 self.optimizerEnc.step()

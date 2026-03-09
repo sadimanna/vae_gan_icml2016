@@ -32,6 +32,7 @@ def build_parser():
     parser.add_argument('--gamma', type=float, default=10, help='weight for reconstruction loss in generator objective')
     parser.add_argument('--kld_wt', type=float, default=0.00025, help='weight for KL divergence loss in encoder objective')
     parser.add_argument('--stopIter', type=int, default=10, help='iteration to stop training if early stopping desired (default is effectively no early stopping)')
+    parser.add_argument('--hook_layers', default='conv1', help='comma-separated discriminator conv layer names for hooks (empty to disable)')
     return parser
 
 
@@ -62,7 +63,12 @@ def main():
         netG.load_state_dict(torch.load(opt.netG))
     logger.info(netG)
 
-    netD = Discriminator(opt.imageSize, opt.ndf, nc, opt.ngpu)
+    hook_layers = []
+    raw_hooks = opt.hook_layers.strip()
+    if raw_hooks and raw_hooks.lower() not in ['none', 'null']:
+        hook_layers = [name.strip() for name in raw_hooks.split(',') if name.strip()]
+
+    netD = Discriminator(opt.imageSize, opt.ndf, nc, opt.ngpu, hook_layers=hook_layers)
     netD.apply(weights_init)
     if opt.netD != '':
         netD.load_state_dict(torch.load(opt.netD))

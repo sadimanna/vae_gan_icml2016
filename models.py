@@ -92,7 +92,7 @@ class Generator(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, image_size, ndf, nc, ngpu):
+    def __init__(self, image_size, ndf, nc, ngpu, hook_layers=None):
         super(Discriminator, self).__init__()
         self.ngpu = ngpu
         n = math.log2(image_size)
@@ -117,10 +117,62 @@ class Discriminator(nn.Module):
         self.main.add_module('output-conv', nn.Conv2d(ndf * 2 ** (n - 3), 1, 4, 1, 0, bias=False))
         self.main.add_module('output-sigmoid', nn.Sigmoid())
 
+        self._hook_handles = []
+        self._hooked = {}
+        self._hookable_layers = self._build_hookable_layers()
+        if hook_layers is None:
+            hook_layers = ['conv1']
+        self.set_hook_layers(hook_layers)
+
+    def _build_hookable_layers(self):
+        hookable = {}
+        if 'input-conv' in self.main._modules:
+            hookable['conv1'] = self.main._modules['input-conv']
+            hookable['input-conv'] = self.main._modules['input-conv']
+        for name, module in self.main._modules.items():
+            if name.startswith('conv'):
+                hookable[name] = module
+                if name[4:].isdigit():
+                    idx = int(name[4:]) + 2
+                    hookable['conv%d' % idx] = module
+        return hookable
+
+    def set_hook_layers(self, hook_layers):
+        for handle in self._hook_handles:
+            handle.remove()
+        self._hook_handles = []
+
+        if hook_layers is None:
+            self.hook_layers = []
+            return
+
+        self.hook_layers = list(hook_layers)
+        if len(self.hook_layers) == 0:
+            return
+
+        missing = [name for name in self.hook_layers if name not in self._hookable_layers]
+        if missing:
+            available = ', '.join(sorted(self._hookable_layers.keys()))
+            raise ValueError('Unknown hook layer(s): %s. Available: %s' % (', '.join(missing), available))
+
+        for name in self.hook_layers:
+            module = self._hookable_layers[name]
+            self._hook_handles.append(module.register_forward_hook(self._capture_hook(name)))
+
+    def _capture_hook(self, name):
+        def hook(_module, _input, output):
+            self._hooked[name] = output
+        return hook
+
     def forward(self, input_x):
+        self._hooked = {}
         if isinstance(input_x.data, torch.cuda.FloatTensor) and self.ngpu > 1:
             output = nn.parallel.data_parallel(self.main, input_x, range(self.ngpu))
         else:
             output = self.main(input_x)
 
-        return output.view(-1, 1)
+        if getattr(self, 'hook_layers', None):
+            features = [self._hooked[name] for name in self.hook_layers if name in self._hooked]
+        else:
+            features = []
+        return output.view(-1, 1), features
