@@ -1,23 +1,60 @@
 #!/bin/bash
 #SBATCH --job-name=vae_gan_sweep
-#SBATCH --output=slurm_%x_%j.out
-#SBATCH --error=slurm_%x_%j.err
-#SBATCH --time=24:00:00
-#SBATCH --partition=gpu
+#SBATCH --output=slurm_logs/master_%j.out
+#SBATCH --error=slurm_logs/master_%j.err
+#SBATCH --partition=short
+#SBATCH --nodelist=cn5
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
+#SBATCH --mem=32G
 
 set -euo pipefail
 
-# Optional: load modules
-# module load cuda/11.8
+# Load Python module
+# module load cuda/12.4
+mkdir -p slurm_logs
+# -----------------------------------------------------------------------------
+# Activate virtual environment (SLURM-safe)
+# -----------------------------------------------------------------------------
 
-# Optional: activate your environment
-# source activate.sh
+echo "Activating virtual environment..."
+
+if [[ -z "${SLURM_SUBMIT_DIR:-}" ]]; then
+    echo "ERROR: SLURM_SUBMIT_DIR is not set"
+    exit 1
+fi
+
+echo "SLURM_SUBMIT_DIR = ${SLURM_SUBMIT_DIR}"
+
+# breaching/ is the submit directory
+BASE_DIR="${SLURM_SUBMIT_DIR}"
+
+# project root is one level above
+PROJECT_ROOT="$(cd "${BASE_DIR}/.." && pwd)"
+
+echo "BASE_DIR     = ${BASE_DIR}"
+echo "PROJECT_ROOT = ${PROJECT_ROOT}"
+
+cd "${PROJECT_ROOT}"
+
+if [[ ! -f bin/activate ]]; then
+    echo "ERROR: Virtual environment not found at ${PROJECT_ROOT}/bin/activate"
+    exit 1
+fi
+
+source bin/activate
+
+# Sanity checks
+which python
+python --version
+
+# Return to breaching
+cd "${BASE_DIR}"
+
+echo "Virtual environment activated successfully."
 
 DATASET="mnist"
-DATAROOT="/path/to/data"
+DATAROOT="data"
 OUTDIR="outputs"
 
 GAMMAS=(5 10 15)
