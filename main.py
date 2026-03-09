@@ -30,15 +30,12 @@ class _Sampler(nn.Module):
     def __init__(self):
         super(_Sampler, self).__init__()
         
-    def forward(self,input):
-        mu = input[0]
-        logvar = input[1]
+    def forward(self,input_x):
+        mu = input_x[0]
+        logvar = input_x[1]
         
         std = logvar.mul(0.5).exp_() #calculate the STDEV
-        if opt.cuda:
-            eps = torch.cuda.FloatTensor(std.size()).normal_() #random normalized noise
-        else:
-            eps = torch.FloatTensor(std.size()).normal_() #random normalized noise
+        eps = torch.randn(std.size(), device=std.device)
         eps = Variable(eps)
         return eps.mul(std).add_(mu) 
 
@@ -59,7 +56,7 @@ class _Encoder(nn.Module):
 
         # build a conventional convolutional encoder (same depth as before)
         self.encoder = nn.Sequential()
-        # first block: input -> ngf
+        # first block: input_x -> ngf
         self.encoder.add_module('conv1', nn.Conv2d(nc, ngf, 4, 2, 1, bias=False))
         self.encoder.add_module('lrelu1', nn.LeakyReLU(0.2, inplace=True))
         # subsequent blocks doubling channels each time
@@ -73,8 +70,8 @@ class _Encoder(nn.Module):
 
         # state size. (ngf*2**(n-3)) x 4 x 4
 
-    def forward(self,input):
-        output = self.encoder(input)
+    def forward(self,input_x):
+        output = self.encoder(input_x)
         return [self.conv1(output),self.conv2(output)]
 
 
@@ -100,11 +97,11 @@ class _netG(nn.Module):
             nn.Tanh()
         )
 
-    def forward(self, input):
-        if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
-            output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
+    def forward(self, input_x):
+        if isinstance(input_x.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+            output = nn.parallel.data_parallel(self.main, input_x, range(self.ngpu))
         else:
-            output = self.main(input)
+            output = self.main(input_x)
         return output
 
 
@@ -121,7 +118,7 @@ class _netD(nn.Module):
         n=int(n)
         # build discriminator dynamically so it supports multiple image sizes
         self.main = nn.Sequential()
-        # input conv
+        # input_x conv
         self.main.add_module('input-conv', nn.Conv2d(nc, ndf, 4, 2, 1, bias=False))
         self.main.add_module('input-lrelu', nn.LeakyReLU(0.2, inplace=True))
         # add pyramid blocks based on image size
@@ -137,11 +134,11 @@ class _netD(nn.Module):
         self.main.add_module('output-sigmoid', nn.Sigmoid())
         
 
-    def forward(self, input):
-        if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
-            output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
+    def forward(self, input_x):
+        if isinstance(input_x.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+            output = nn.parallel.data_parallel(self.main, input_x, range(self.ngpu))
         else:
-            output = self.main(input)
+            output = self.main(input_x)
 
         return output.view(-1, 1)
 
@@ -155,8 +152,8 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', required=True, help='cifar10 | lsun | imagenet | folder | lfw ')
     parser.add_argument('--dataroot', required=True, help='path to dataset')
     parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
-    parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
-    parser.add_argument('--imageSize', type=int, default=64, help='the height / width of the input image to network')
+    parser.add_argument('--batchSize', type=int, default=64, help='input_x batch size')
+    parser.add_argument('--imageSize', type=int, default=64, help='the height / width of the input_x image to network')
     parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
     parser.add_argument('--ngf', type=int, default=64)
     parser.add_argument('--ndf', type=int, default=64)
@@ -168,8 +165,11 @@ if __name__ == "__main__":
     parser.add_argument('--ngpu', type=int, default=1, help='number of GPUs to use')
     parser.add_argument('--netG', default='', help="path to netG (to continue training)")
     parser.add_argument('--netD', default='', help="path to netD (to continue training)")
-    parser.add_argument('--outf', default='.', help='folder to output images and model checkpoints')
+    parser.add_argument('--outf', default='outputs', help='folder to output images and model checkpoints')
     parser.add_argument('--manualSeed', type=int, help='manual seed')
+    parser.add_argument('--gamma', type=float, default=10, help='weight for reconstruction loss in generator objective')
+    parser.add_argument('--kld_wt', type=float, default=0.00025, help='weight for KL divergence loss in encoder objective')
+    parser.add_argument('--stopIter', type=int, default=10, help='iteration to stop training if early stopping desired (default is effectively no early stopping)')
 
     opt = parser.parse_args()
     # ensure base output directory exists
@@ -242,6 +242,10 @@ if __name__ == "__main__":
     ndf = int(opt.ndf)
     nc = 3
 
+    patience = opt.stopIter
+    prevDLoss = None
+    prevGLoss = None
+
     # decoupled encoder + sampler and DCGAN-style generator
     encoder = _Encoder(opt.imageSize)
     sampler = _Sampler()
@@ -262,7 +266,7 @@ if __name__ == "__main__":
     criterion = nn.BCELoss()
     MSECriterion = nn.MSELoss()
 
-    input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
+    input_x = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
     noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
     fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
     label = torch.FloatTensor(opt.batchSize)
@@ -276,10 +280,10 @@ if __name__ == "__main__":
         sampler.cuda()
         criterion.cuda()
         MSECriterion.cuda()
-        input, label = input.cuda(), label.cuda()
+        input_x, label = input_x.cuda(), label.cuda()
         noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
 
-    input = Variable(input)
+    input_x = Variable(input_x)
     label = Variable(label)
     noise = Variable(noise)
     fixed_noise = Variable(fixed_noise)
@@ -294,49 +298,51 @@ if __name__ == "__main__":
     for epoch in range(opt.niter):
         for i, data in enumerate(dataloader, 0):
             ############################
-            # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
+            # (1) Update D network: maximize log(D(x)) + log(1 - D(Dec(z))) + log(1-D(Dec(Enc(x))))
             ###########################
             # train with real
             netD.zero_grad()
             real_cpu, _ = data
             batch_size = real_cpu.size(0)
-            input.data.resize_(real_cpu.size()).copy_(real_cpu)
+            input_x.data.resize_(real_cpu.size()).copy_(real_cpu)
             label.data.resize_(real_cpu.size(0)).fill_(real_label)
 
-            output = netD(input)
+            # Dis(x)
+            output = netD(input_x)
             errD_real = criterion(output, label.view(-1, 1))
-            errD_real.backward()
+            # errD_real.backward()
             D_x = output.data.mean()
 
-            # train with fake
+            # train with fake - Dis(Dec(z))
             noise.data.resize_(batch_size, nz, 1, 1)
             noise.data.normal_(0, 1)
             gen = netG(noise)
             label.data.fill_(fake_label)
             output = netD(gen.detach())
             errD_fake = criterion(output, label.view(-1, 1))
-            errD_fake.backward()
+            # errD_fake.backward()
             D_G_z1 = output.data.mean()
             
-            # train with reconstructed (encoded->sampled->decoded)
-            encoded = encoder(input)
+            # train with reconstructed (encoded->sampled->decoded) -- Dis(Dec(Enc(x)))
+            encoded = encoder(input_x)
             sampled = sampler(encoded)
             rec = netG(sampled)
             output = netD(rec.detach())
-            errD_rec = criterion(output, label.view(-1, 1))  # label is already fake_label
-            errD_rec.backward()
+            errD_rec = criterion(output, label.view(-1, 1))  # label is already fake_label -- right
+            # errD_rec.backward()
             D_G_z_rec = output.data.mean()
             
             errD = errD_real + errD_fake + errD_rec
+            errD.backward(retain_graph=True)
             optimizerD.step()
             ############################
-            # (2) Update G network: VAE
+            # (2) Update Encoder network: minimize KL divergence + reconstruction error
             ###########################
             
             encoder.zero_grad()
             # netG.zero_grad()
 
-            encoded = encoder(input)
+            encoded = encoder(input_x)
             mu = encoded[0]
             logvar = encoded[1]
             
@@ -346,9 +352,9 @@ if __name__ == "__main__":
             sampled = sampler(encoded)
             rec = netG(sampled)
             
-            MSEerr = MSECriterion(rec, input)
+            MSEerr = MSECriterion(rec, input_x)
             
-            VAEerr = KLD_loss + MSEerr
+            VAEerr = opt.kld_wt * KLD_loss + MSEerr
             VAEerr.backward()
             optimizerEnc.step()
             # optimizerG.step()
@@ -360,28 +366,60 @@ if __name__ == "__main__":
             label.data.fill_(real_label)  # fake labels are real for generator cost
 
             netG.zero_grad()
+            # Dis(x)
+            output = netD(input_x)
+            errG_real = criterion(output, label.view(-1, 1))
+            # errG_real.backward()
+            G_x = output.data.mean()
+
+            # train with fake - Dis(Dec(z))
+            noise.data.resize_(batch_size, nz, 1, 1)
+            noise.data.normal_(0, 1)
+            gen = netG(noise)
+            label.data.fill_(fake_label)
+            output = netD(gen.detach())
+            errG_fake = criterion(output, label.view(-1, 1))
+            # errD_fake.backward()
+            D_G_z1 = output.data.mean()
+
             # reconstruct via encoder->sampler->generator
-            encoded = encoder(input)
+            encoded = encoder(input_x)
             sampled = sampler(encoded)
             rec = netG(sampled)
             output = netD(rec)
             errG_adv = criterion(output, label.view(-1, 1))
+
+            gan_loss = errG_adv + errG_fake + errG_real
             
             # add reconstruction loss to generator training
-            MSEerr_G = MSECriterion(rec, input)
-            errG = errG_adv + MSEerr_G
+            MSEerr_G = MSECriterion(rec, input_x)
+            errG =  - gan_loss + opt.gamma * MSEerr_G
             errG.backward()
             D_G_z2 = output.data.mean()
             optimizerG.step()
 
             if i % 500 == 0:
                 # save generated batch to file
-                vutils.save_image(gen.data, os.path.join(opt.outf, 'gen_epoch%d_iter%d.png' % (epoch, i)), normalize=True)
+                vutils.save_image(gen, os.path.join(opt.outf, 'gen_epoch%d_iter%d.png' % (epoch, i)), normalize=True, range=(-1, 1))
                 # save reconstruction batch to file
-                vutils.save_image(rec.data, os.path.join(opt.outf, 'rec_epoch%d_iter%d.png' % (epoch, i)), normalize=True)
+                vutils.save_image(rec, os.path.join(opt.outf, 'rec_epoch%d_iter%d.png' % (epoch, i)), normalize=True, range=(-1, 1))
                 logger.info('[%d/%d][%d/%d] Loss_VAE: %.4f Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f D(Dec(Enc(x))): %.4f',
-                    epoch+1, opt.niter, i, len(dataloader),
-                        VAEerr.item(), errD.item(), errG.item(), D_x, D_G_z1, D_G_z_rec)
+                    epoch+1, opt.niter, i, len(dataloader), VAEerr.item(), errD.item(), errG.item(), D_x, D_G_z1, D_G_z_rec)
+                
+                if prevDLoss is not None and prevGLoss is not None:
+                    if errD.item() > prevDLoss and abs(errG.item()) > prevGLoss:
+                        patience -= 1
+                        logger.info('No improvement in D or G loss, reducing patience to %d', patience)
+                    if patience <= 0:
+                        logger.info('Early stopping at epoch %d, iteration %d', epoch+1, i)
+                        break
+                    else:
+                        patience = opt.stopIter
+                        prevDLoss = errD.item()
+                        prevGLoss = abs(errG.item())
+                else:
+                    prevDLoss = errD.item()
+                    prevGLoss = abs(errG.item())
 
         if (epoch+1)%opt.saveInt == 0 and epoch!=0:
             torch.save(netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.outf, epoch+1))
