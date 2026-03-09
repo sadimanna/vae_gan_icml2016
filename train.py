@@ -59,7 +59,8 @@ class Trainer:
 
     def _recon_loss(self, rec, rec_feats):
         if rec_feats:
-            _, real_feats = self.netD(self.input_x)
+            with torch.no_grad():
+                _, real_feats = self.netD(self.input_x)
             if not real_feats:
                 return self.mse_criterion(rec, self.input_x)
             return self._feature_mse(rec_feats, real_feats)
@@ -130,7 +131,7 @@ class Trainer:
                 else:
                     MSEerr_G = self.mse_criterion(rec, self.input_x)
                 errG = -errG_fake - errG_adv + opt.gamma * MSEerr_G
-                errG.backward()
+                errG.backward(retain_graph=False)
                 D_G_z2 = output.data.mean()
                 self.optimizerG.step()
 
@@ -147,8 +148,8 @@ class Trainer:
                 sampled = self.sampler(encoded)
                 rec = self.netG(sampled)
                 if self.netD.hook_layers:
-                    _, input_feats = self.netD(self.input_x)
-                    MSEerr = self._recon_loss(input_feats, rec_feats)
+                    _, rec_feats = self.netD(rec)
+                    MSEerr = self._recon_loss(rec, rec_feats)
                 else:
                     MSEerr = self.mse_criterion(rec, self.input_x)
                 VAEerr = opt.kld_wt * KLD_loss + MSEerr
