@@ -5,6 +5,17 @@ import torch.optim as optim
 import torchvision.utils as vutils
 from torch.autograd import Variable
 
+try:
+    from torchmetrics.image.fid import FrechetInceptionDistance
+    from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+    from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
+    _TORCHMETRICS_AVAILABLE = True
+except Exception:
+    FrechetInceptionDistance = None
+    LearnedPerceptualImagePatchSimilarity = None
+    StructuralSimilarityIndexMeasure = None
+    _TORCHMETRICS_AVAILABLE = False
+
 
 class Trainer:
     def __init__(self, opt, encoder, sampler, netG, netD, logger):
@@ -45,9 +56,12 @@ class Trainer:
         self.fixed_noise = Variable(self.fixed_noise)
 
         # setup optimizers: separate for encoder and generator
-        self.optimizerD = optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-        self.optimizerEnc = optim.Adam(self.encoder.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-        self.optimizerG = optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+        # self.optimizerD = optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+        # self.optimizerEnc = optim.Adam(self.encoder.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+        # self.optimizerG = optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+        self.optimizerD = optim.RMSprop(self.netD.parameters(), lr=opt.lr*0.1)
+        self.optimizerG = optim.RMSprop(self.netG.parameters(), lr=opt.lr)
+        self.optimizerEnc = optim.RMSprop(self.encoder.parameters(), lr=opt.lr)
 
         self.patience = opt.stopIter
         self.prevDLoss = None
@@ -70,10 +84,90 @@ class Trainer:
             return self._feature_mse(rec_feats, real_feats)
         return self.mse_criterion(rec, self.input_x)
 
+    def _normalize_to_01(self, tensor, eps=1e-8):
+        # Normalize tensor to [0, 1] range for image saving.
+        t_min = tensor.amin()
+        t_max = tensor.amax()
+        return (tensor - t_min) / (t_max - t_min + eps)
+
+    def _denorm_to_01(self, tensor):
+        # Data pipeline normalizes to [-1, 1]. Map back to [0, 1] for metrics.
+        return ((tensor + 1.0) / 2.0).clamp(0.0, 1.0)
+
+    def _build_metrics(self):
+        if not _TORCHMETRICS_AVAILABLE:
+            return None
+        fid = FrechetInceptionDistance(feature=2048, normalize=True).to(self.device)
+        ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
+        lpips = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).to(self.device)
+        return fid, ssim, lpips
+
+    def evaluate(self, dataloader):
+        opt = self.opt
+        eval_samples = int(getattr(opt, 'eval_samples', 0))
+        if eval_samples <= 0:
+            self.logger.info('Skipping evaluation: eval_samples <= 0')
+            return
+
+        metrics = self._build_metrics()
+        if metrics is None:
+            self.logger.warning('Skipping evaluation: torchmetrics not available')
+            return
+
+        fid, ssim, lpips = metrics
+
+        self.netG.eval()
+        self.encoder.eval()
+        self.sampler.eval()
+
+        seen = 0
+        with torch.no_grad():
+            for real_cpu, _ in dataloader:
+                if seen >= eval_samples:
+                    break
+                real = real_cpu.to(self.device)
+                batch_size = real.size(0)
+                remaining = eval_samples - seen
+                if remaining < batch_size:
+                    real = real[:remaining]
+                    batch_size = real.size(0)
+
+                real_01 = self._denorm_to_01(real)
+                fid.update(real_01, real=True)
+
+                noise = torch.randn(batch_size, opt.nz, 1, 1, device=self.device)
+                fake = self.netG(noise)
+                fake_01 = self._denorm_to_01(fake)
+                fid.update(fake_01, real=False)
+
+                encoded = self.encoder(real)
+                sampled = self.sampler(encoded)
+                rec = self.netG(sampled)
+                rec_01 = self._denorm_to_01(rec)
+
+                ssim.update(rec_01, real_01)
+                lpips.update(rec_01, real_01)
+
+                seen += batch_size
+
+        fid_score = fid.compute().item()
+        ssim_score = ssim.compute().item()
+        lpips_score = lpips.compute().item()
+
+        self.logger.info(
+            'Eval metrics over %d samples | FID: %.4f | SSIM: %.4f | LPIPS: %.4f',
+            seen,
+            fid_score,
+            ssim_score,
+            lpips_score,
+        )
+
     def train(self, dataloader):
         opt = self.opt
+        torch.autograd.set_detect_anomaly(True)
         for epoch in range(opt.niter):
             for i, data in enumerate(dataloader, 0):
+                
                 ############################
                 # (1) Update D network: maximize log(D(x)) + log(1 - D(Dec(z))) + log(1-D(Dec(Enc(x))))
                 ###########################
@@ -101,11 +195,11 @@ class Trainer:
                 encoded = self.encoder(self.input_x)
                 sampled = self.sampler(encoded)
                 rec = self.netG(sampled)  # ------------------------> Reconstruction
-                output, _ = self.netD(rec.detach())
+                output, rec_feats = self.netD(rec.detach())
                 errD_rec = self.criterion(output, self.label.view(-1, 1))
                 D_G_z_rec = output.data.mean()
                 errD = errD_real + errD_fake + errD_rec
-                errD.backward(retain_graph=False)
+                errD.backward()
                 self.optimizerD.step()
 
                 ############################
@@ -114,29 +208,29 @@ class Trainer:
 
                 self.label.data.fill_(self.real_label)  # fake labels are real for generator cost
                 self.netG.zero_grad()
-                # train with fake - Dis(Dec(z))
-                self.noise.data.resize_(batch_size, opt.nz, 1, 1)
-                self.noise.data.normal_(0, 1)
-                gen = self.netG(self.noise)
-                ######### Rec part ###########
+                # # train with fake - Dis(Dec(z))
+                # self.noise.data.resize_(batch_size, opt.nz, 1, 1)
+                # self.noise.data.normal_(0, 1)
+                # gen = self.netG(self.noise)
+                # ######### Rec part ###########
                 self.label.data.fill_(self.fake_label)
                 output, _ = self.netD(gen)
                 errG_fake = self.criterion(output, self.label.view(-1, 1))
-                D_G_z1 = output.data.mean()
-                # reconstruct via encoder->sampler->generator
-                encoded = self.encoder(self.input_x)
-                sampled = self.sampler(encoded)
-                rec = self.netG(sampled)
+                # D_G_z1 = output.data.mean()
+                # # reconstruct via encoder->sampler->generator
+                # encoded = self.encoder(self.input_x)
+                # sampled = self.sampler(encoded)
+                # rec = self.netG(sampled)
                 output, rec_feats = self.netD(rec)
                 errG_adv = self.criterion(output, self.label.view(-1, 1))
-                # add reconstruction loss to generator training
+                # # add reconstruction loss to generator training
+                # recompute discriminator output for generator loss using current D params
                 if self.netD.hook_layers:
-                    _, input_feats = self.netD(self.input_x)
-                    MSEerr_G = self._recon_loss(input_feats, rec_feats)
+                    MSEerr_G = self._recon_loss(rec, rec_feats)
                 else:
                     MSEerr_G = self.mse_criterion(rec, self.input_x)
-                errG = -errG_fake - errG_adv + opt.gamma * MSEerr_G
-                errG.backward(retain_graph=False)
+                errG = -errG_fake -errG_adv + opt.gamma * MSEerr_G
+                errG.backward()
                 D_G_z2 = output.data.mean()
                 self.optimizerG.step()
 
@@ -164,18 +258,22 @@ class Trainer:
                 if i % 500 == 0:
                     # save generated batch to file
                     vutils.save_image(
-                        gen,
+                        self._normalize_to_01(gen),
                         os.path.join(opt.outf, 'gen_epoch%d_iter%d.png' % (epoch, i)),
-                        normalize=True,
-                        value_range=(-1, 1),
+                        normalize=False,
                     )
                     # save reconstruction batch to file
                     vutils.save_image(
-                        rec,
+                        self._normalize_to_01(rec),
                         os.path.join(opt.outf, 'rec_epoch%d_iter%d.png' % (epoch, i)),
-                        normalize=True,
-                        value_range=(-1, 1),
+                        normalize=False,
                     )
+
+                    # print(f"Range of outputs: {gen.min().item()}-{gen.max().item()}")
+                    # gen.clamp_(min=-1.0, max=1.0)
+                    # gen.sub_(-1.0).div_(max(2.0, 1e-5))
+                    # print(f"Range of outputs: {gen.min().item()}-{gen.max().item()}")
+
                     self.logger.info(
                         '[%d/%d][%d/%d] Loss_VAE: %.4f Loss_D: %.4f Loss_G: %.4f '
                         'D(x): %.4f D(G(z)): %.4f D(Dec(Enc(x))): %.4f',
@@ -200,11 +298,8 @@ class Trainer:
                                 break
                         else:
                             self.patience = opt.stopIter
-                            self.prevDLoss = errD.item()
-                            self.prevGLoss = abs(errG.item())
-                    else:
-                        self.prevDLoss = errD.item()
-                        self.prevGLoss = abs(errG.item())
+                    self.prevDLoss = errD.item()
+                    self.prevGLoss = abs(errG.item())
 
             if self.patience <= 0:
                 self.logger.info('Early stopping at epoch %d, iteration %d', epoch + 1, i)
@@ -214,3 +309,5 @@ class Trainer:
                 torch.save(self.netG.state_dict(), '%s/netG_epoch_%d.pth' % (opt.outf, epoch + 1))
                 torch.save(self.netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.outf, epoch + 1))
                 torch.save(self.encoder.state_dict(), '%s/encoder_epoch_%d.pth' % (opt.outf, epoch + 1))
+
+        self.evaluate(dataloader)

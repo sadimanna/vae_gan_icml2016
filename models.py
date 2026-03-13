@@ -23,10 +23,10 @@ class Sampler(nn.Module):
         mu = input_x[0]
         logvar = input_x[1]
 
-        std = logvar.mul(0.5).exp_()
+        std = logvar.mul(0.5).exp()
         eps = torch.randn(std.size(), device=std.device)
         eps = Variable(eps)
-        return eps.mul(std).add_(mu)
+        return eps.mul(std).add(mu)
 
 
 class Encoder(nn.Module):
@@ -34,31 +34,37 @@ class Encoder(nn.Module):
         super(Encoder, self).__init__()
 
         n = math.log2(image_size)
-
         assert n == round(n), 'imageSize must be a power of 2'
         assert n >= 3, 'imageSize must be at least 8'
         n = int(n)
 
-        self.conv1 = nn.Conv2d(ngf * 2 ** (n - 3), nz, 4)
-        self.conv2 = nn.Conv2d(ngf * 2 ** (n - 3), nz, 4)
+        # Architecture per VAE-GAN figure (5x5 convs, stride 2, BNorm, ReLU)
+        self.encoder = nn.Sequential(
+            nn.Conv2d(nc, 64, 5, 2, 2, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(64, 128, 5, 2, 2, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(128, 256, 5, 2, 2, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=False),
+        )
 
-        # build a conventional convolutional encoder (same depth as before)
-        self.encoder = nn.Sequential()
-        # first block: input_x -> ngf
-        self.encoder.add_module('conv1', nn.Conv2d(nc, ngf, 4, 2, 1, bias=False))
-        self.encoder.add_module('lrelu1', nn.LeakyReLU(0.2, inplace=True))
-        # subsequent blocks doubling channels each time
-        for i in range(n - 3):
-            in_ch = ngf * 2 ** i
-            out_ch = ngf * 2 ** (i + 1)
-            idx = i + 2
-            self.encoder.add_module('conv%d' % idx, nn.Conv2d(in_ch, out_ch, 4, 2, 1, bias=False))
-            self.encoder.add_module('bn%d' % idx, nn.BatchNorm2d(out_ch))
-            self.encoder.add_module('lrelu%d' % idx, nn.LeakyReLU(0.2, inplace=True))
+        spatial = image_size // (2 ** 3)
+        self.fc = nn.Sequential(
+            nn.Linear(256 * spatial * spatial, 2048, bias=False),
+            nn.BatchNorm1d(2048),
+            nn.ReLU(inplace=False),
+        )
+        self.fc_mu = nn.Linear(2048, nz)
+        self.fc_logvar = nn.Linear(2048, nz)
 
     def forward(self, input_x):
         output = self.encoder(input_x)
-        return [self.conv1(output), self.conv2(output)]
+        output = output.view(output.size(0), -1)
+        output = self.fc(output)
+        return [self.fc_mu(output), self.fc_logvar(output)]
 
 
 class Generator(nn.Module):
@@ -70,31 +76,40 @@ class Generator(nn.Module):
         assert n >= 3, 'imageSize must be at least 8'
         n = int(n)
 
-        # DCGAN-style generator built dynamically to match image size
-        self.main = nn.Sequential()
-        # initial 4x4 block
-        start_ch = ngf * 2 ** (n - 3)
-        self.main.add_module('tconv0', nn.ConvTranspose2d(nz, start_ch, 4, 1, 0, bias=False))
-        self.main.add_module('tbn0', nn.BatchNorm2d(start_ch))
-        self.main.add_module('trelu0', nn.ReLU(True))
-
-        # upsample blocks to reach image_size
-        for i in range(n - 2):
-            in_ch = ngf * 2 ** (n - 3 - i)
-            is_last = (i == n - 3)
-            out_ch = nc if is_last else ngf * 2 ** (n - 4 - i)
-            self.main.add_module('tconv%d' % (i + 1), nn.ConvTranspose2d(in_ch, out_ch, 4, 2, 1, bias=False))
-            if is_last:
-                self.main.add_module('tanh', nn.Tanh())
-            else:
-                self.main.add_module('tbn%d' % (i + 1), nn.BatchNorm2d(out_ch))
-                self.main.add_module('trelu%d' % (i + 1), nn.ReLU(True))
+        # Architecture per VAE-GAN figure (8x8x256 FC, 5x5 deconvs, tanh)
+        self.start_spatial = image_size // (2 ** 3)
+        self.fc = nn.Sequential(
+            nn.Linear(nz, 256 * self.start_spatial * self.start_spatial, bias=False),
+            nn.BatchNorm1d(256 * self.start_spatial * self.start_spatial),
+            nn.ReLU(inplace=False),
+        )
+        self.deconv = nn.Sequential(
+            nn.ConvTranspose2d(256, 256, 5, 2, 2, output_padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=False),
+            nn.ConvTranspose2d(256, 128, 5, 2, 2, output_padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=False),
+            nn.ConvTranspose2d(128, 32, 5, 2, 2, output_padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(32, nc, 5, 1, 2, bias=False),
+            nn.Tanh(),
+        )
 
     def forward(self, input_x):
+        if input_x.dim() == 4 and input_x.size(2) == 1 and input_x.size(3) == 1:
+            input_x = input_x.view(input_x.size(0), -1)
+
         if isinstance(input_x.data, torch.cuda.FloatTensor) and self.ngpu > 1:
-            output = nn.parallel.data_parallel(self.main, input_x, range(self.ngpu))
+            output = nn.parallel.data_parallel(self.fc, input_x, range(self.ngpu))
         else:
-            output = self.main(input_x)
+            output = self.fc(input_x)
+        output = output.view(output.size(0), 256, self.start_spatial, self.start_spatial)
+        if isinstance(output.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+            output = nn.parallel.data_parallel(self.deconv, output, range(self.ngpu))
+        else:
+            output = self.deconv(output)
         return output
 
 
@@ -107,22 +122,29 @@ class Discriminator(nn.Module):
         assert n == round(n), 'imageSize must be a power of 2'
         assert n >= 3, 'imageSize must be at least 8'
         n = int(n)
-        # build discriminator dynamically so it supports multiple image sizes
-        self.main = nn.Sequential()
-        # input_x conv
-        self.main.add_module('input-conv', nn.Conv2d(nc, ndf, 4, 2, 1, bias=False))
-        self.main.add_module('input-lrelu', nn.LeakyReLU(0.2, inplace=True))
-        # add pyramid blocks based on image size
-        for i in range(n - 3):
-            in_ch = ndf * 2 ** i
-            out_ch = ndf * 2 ** (i + 1)
-            self.main.add_module('conv%d' % i, nn.Conv2d(in_ch, out_ch, 4, 2, 1, bias=False))
-            self.main.add_module('bn%d' % i, nn.BatchNorm2d(out_ch))
-            self.main.add_module('lrelu%d' % i, nn.LeakyReLU(0.2, inplace=True))
+        # Architecture per VAE-GAN figure (5x5 convs, stride 2, BNorm, ReLU)
+        self.main = nn.Sequential(
+            nn.Conv2d(nc, 32, 5, 2, 2, bias=False),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(32, 128, 5, 2, 2, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(128, 256, 5, 2, 2, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(256, 256, 5, 2, 2, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=False),
+        )
 
-        # final output conv to single score (kernel should match remaining spatial size)
-        self.main.add_module('output-conv', nn.Conv2d(ndf * 2 ** (n - 3), 1, 4, 1, 0, bias=False))
-        self.main.add_module('output-sigmoid', nn.Sigmoid())
+        spatial = image_size // (2 ** 4)
+        self.classifier = nn.Sequential(
+            nn.Linear(256 * spatial * spatial, 512, bias=False),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=False),
+            nn.Linear(512, 1),
+            nn.Sigmoid(),
+        )
 
         self._hook_handles = []
         self._hooked = {}
@@ -133,15 +155,13 @@ class Discriminator(nn.Module):
 
     def _build_hookable_layers(self):
         hookable = {}
-        if 'input-conv' in self.main._modules:
-            hookable['conv1'] = self.main._modules['input-conv']
-            hookable['input-conv'] = self.main._modules['input-conv']
         for name, module in self.main._modules.items():
-            if name.startswith('conv'):
+            if isinstance(module, nn.Conv2d):
                 hookable[name] = module
-                if name[4:].isdigit():
-                    idx = int(name[4:]) + 2
-                    hookable['conv%d' % idx] = module
+        # expose numbered conv layers for backward compatibility
+        conv_names = [name for name, module in self.main._modules.items() if isinstance(module, nn.Conv2d)]
+        for idx, name in enumerate(conv_names, start=1):
+            hookable['conv%d' % idx] = self.main._modules[name]
         return hookable
 
     def set_hook_layers(self, hook_layers):
@@ -177,6 +197,11 @@ class Discriminator(nn.Module):
             output = nn.parallel.data_parallel(self.main, input_x, range(self.ngpu))
         else:
             output = self.main(input_x)
+        output = output.view(output.size(0), -1)
+        if isinstance(output.data, torch.cuda.FloatTensor) and self.ngpu > 1:
+            output = nn.parallel.data_parallel(self.classifier, output, range(self.ngpu))
+        else:
+            output = self.classifier(output)
 
         if getattr(self, 'hook_layers', None):
             features = [self._hooked[name] for name in self.hook_layers if name in self._hooked]

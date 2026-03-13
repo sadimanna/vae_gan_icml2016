@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import argparse
+import os
 import torch
 
 from data import build_dataloader
@@ -8,6 +9,24 @@ from models import Discriminator, Encoder, Generator, Sampler, weights_init
 from train import Trainer
 from utils import set_seed, setup_logger, setup_output_dir
 
+def print_config_tree(d, indent=0):
+    for i, (k, v) in enumerate(d.items()):
+        prefix = "│   " * indent
+        connector = "├── "
+
+        if isinstance(v, dict):
+            print(f"{prefix}{connector}{k}")
+            print_config_tree(v, indent + 1)
+        else:
+            print(f"{prefix}{connector}{k}: {v}")
+
+
+def pretty_print_args(args):
+    config = vars(args)
+
+    print("\nCONFIG")
+    print_config_tree(config)
+    print()
 
 def build_parser():
     parser = argparse.ArgumentParser()
@@ -19,8 +38,8 @@ def build_parser():
     parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
     parser.add_argument('--ngf', type=int, default=64)
     parser.add_argument('--ndf', type=int, default=64)
-    parser.add_argument('--niter', type=int, default=25, help='number of epochs to train for')
-    parser.add_argument('--saveInt', type=int, default=5, help='number of epochs between checkpoints')
+    parser.add_argument('--niter', type=int, default=30, help='number of epochs to train for')
+    parser.add_argument('--saveInt', type=int, default=10, help='number of epochs between checkpoints')
     parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, default=0.0002')
     parser.add_argument('--beta1', type=float, default=0.9, help='beta1 for adam. default=0.5')
     parser.add_argument('--cuda', action='store_true', help='enables cuda')
@@ -33,6 +52,7 @@ def build_parser():
     parser.add_argument('--kld_wt', type=float, default=0.00025, help='weight for KL divergence loss in encoder objective')
     parser.add_argument('--stopIter', type=int, default=10, help='iteration to stop training if early stopping desired (default is effectively no early stopping)')
     parser.add_argument('--hook_layers', default='conv1', help='comma-separated discriminator conv layer names for hooks (empty to disable)')
+    parser.add_argument('--eval_samples', type=int, default=5000, help='number of samples for evaluation metrics (0 to skip)')
     return parser
 
 
@@ -40,7 +60,10 @@ def main():
     parser = build_parser()
     opt = parser.parse_args()
 
-    run_dir = setup_output_dir(opt.outf, run_format='%d:%m:%Y_%H:%M:%S')
+    pretty_print_args(opt)
+
+    run_dir = setup_output_dir(opt.outf, run_format='%d:%m:%Y_%H:%M:%S', dataset = opt.dataset)
+    print(f"Outputs will be saved in: {os.path.basename(run_dir)}")
     logger = setup_logger(run_dir)
     logger.info(opt)
     opt.outf = run_dir

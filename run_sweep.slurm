@@ -1,14 +1,13 @@
 #!/bin/bash
+
 #SBATCH --job-name=vae_gan_sweep
 #SBATCH --output=slurm_logs/master_%j.out
 #SBATCH --error=slurm_logs/master_%j.err
-#SBATCH --partition=short
-#SBATCH --nodelist=cn5
+#SBATCH --partition=long
+#SBATCH --nodelist=cn4
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-
-set -euo pipefail
+#SBATCH --mem=16G
 
 # Load Python module
 # module load cuda/12.4
@@ -48,17 +47,20 @@ source bin/activate
 which python
 python --version
 
+# Metrics dependencies
+# python -m pip install -q torchmetrics lpips
+
 # Return to breaching
 cd "${BASE_DIR}"
 
 echo "Virtual environment activated successfully."
 
-DATASET="mnist"
+DATASET="cifar10"
 DATAROOT="data"
 OUTDIR="outputs"
 
-GAMMAS=(5 10 15)
-KLD_WTS=(0.0001 0.00025 0.0005)
+GAMMAS=(15 10 5 1)
+KLD_WTS=(0.0001 0.00025 0.0005 0.001 0.0025 0.005 0.01)
 
 for gamma in "${GAMMAS[@]}"; do
   for kld in "${KLD_WTS[@]}"; do
@@ -69,6 +71,10 @@ for gamma in "${GAMMAS[@]}"; do
       --outf "${OUTDIR}" \
       --gamma "${gamma}" \
       --kld_wt "${kld}" \
-      --cuda
+      --cuda \
+      --imageSize 64 \
+      --batchSize 64 \
+      --niter 50 \
+      --eval_samples 5000
   done
 done

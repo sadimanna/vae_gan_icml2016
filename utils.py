@@ -7,7 +7,7 @@ import torch
 import torch.backends.cudnn as cudnn
 
 
-def setup_output_dir(base_outf, run_format=None):
+def setup_output_dir(base_outf, run_format=None, dataset=None):
     try:
         os.makedirs(base_outf)
     except OSError:
@@ -15,7 +15,9 @@ def setup_output_dir(base_outf, run_format=None):
 
     if run_format is None:
         run_format = '%Y%m%d_%H%M%S'
-    ts = datetime.datetime.now().strftime(run_format)
+    ts = datetime.datetime.now().strftime(run_format).replace(':','')
+    if dataset is not None:
+        ts = '_'.join([dataset, ts])
     run_dir = os.path.join(base_outf, 'run_%s' % ts)
     try:
         os.makedirs(run_dir)
