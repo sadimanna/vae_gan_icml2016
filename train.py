@@ -59,7 +59,7 @@ class Trainer:
         # self.optimizerD = optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
         # self.optimizerEnc = optim.Adam(self.encoder.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
         # self.optimizerG = optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-        self.optimizerD = optim.RMSprop(self.netD.parameters(), lr=opt.lr*0.1)
+        self.optimizerD = optim.RMSprop(self.netD.parameters(), lr=opt.lr)
         self.optimizerG = optim.RMSprop(self.netG.parameters(), lr=opt.lr)
         self.optimizerEnc = optim.RMSprop(self.encoder.parameters(), lr=opt.lr)
 
@@ -74,6 +74,10 @@ class Trainer:
         if len(losses) == 1:
             return losses[0]
         return sum(losses) / len(losses)
+    
+    def _set_requires_grad(self, model, requires_grad):
+        for param in model.parameters():
+            param.requires_grad = requires_grad
 
     def _recon_loss(self, rec, rec_feats):
         if rec_feats:
@@ -167,93 +171,89 @@ class Trainer:
         torch.autograd.set_detect_anomaly(True)
         for epoch in range(opt.niter):
             for i, data in enumerate(dataloader, 0):
-                
-                ############################
-                # (1) Update D network: maximize log(D(x)) + log(1 - D(Dec(z))) + log(1-D(Dec(Enc(x))))
-                ###########################
-                # train with real
+                self.encoder.zero_grad()
                 self.netD.zero_grad()
+                self.netG.zero_grad()
+                ############################
                 real_cpu, _ = data
                 real = real_cpu.to(self.device)
                 batch_size = real.size(0)
-                self.input_x.data.resize_(real.size()).copy_(real)
-                #################################
-                # Dis(x)
-                self.label.data.resize_(real_cpu.size(0)).fill_(self.real_label)
-                output, _ = self.netD(self.input_x)
-                errD_real = self.criterion(output, self.label.view(-1, 1))
-                D_x = output.data.mean()
-                # train with fake - Dis(Dec(z))
-                self.noise.data.resize_(batch_size, opt.nz, 1, 1)
-                self.noise.data.normal_(0, 1)
-                gen = self.netG(self.noise)
-                self.label.data.fill_(self.fake_label)
-                output, _ = self.netD(gen.detach())
-                errD_fake = self.criterion(output, self.label.view(-1, 1))
-                D_G_z1 = output.data.mean()
-                # train with reconstructed (encoded->sampled->decoded) -- Dis(Dec(Enc(x)))
-                encoded = self.encoder(self.input_x)
-                sampled = self.sampler(encoded)
-                rec = self.netG(sampled)  # ------------------------> Reconstruction
-                output, rec_feats = self.netD(rec.detach())
-                errD_rec = self.criterion(output, self.label.view(-1, 1))
-                D_G_z_rec = output.data.mean()
-                errD = errD_real + errD_fake + errD_rec
-                errD.backward()
-                self.optimizerD.step()
-
+                with torch.no_grad():
+                    self.input_x.resize_(real.size()).copy_(real)
                 ############################
-                # (3) Update G network: maximize log(D(G(z))) + reconstruction loss
+                # (1) Encoder first
                 ###########################
-
-                self.label.data.fill_(self.real_label)  # fake labels are real for generator cost
-                self.netG.zero_grad()
-                # # train with fake - Dis(Dec(z))
-                # self.noise.data.resize_(batch_size, opt.nz, 1, 1)
-                # self.noise.data.normal_(0, 1)
-                # gen = self.netG(self.noise)
-                # ######### Rec part ###########
-                self.label.data.fill_(self.fake_label)
-                output, _ = self.netD(gen)
-                errG_fake = self.criterion(output, self.label.view(-1, 1))
-                # D_G_z1 = output.data.mean()
-                # # reconstruct via encoder->sampler->generator
-                # encoded = self.encoder(self.input_x)
-                # sampled = self.sampler(encoded)
-                # rec = self.netG(sampled)
-                output, rec_feats = self.netD(rec)
-                errG_adv = self.criterion(output, self.label.view(-1, 1))
-                # # add reconstruction loss to generator training
-                # recompute discriminator output for generator loss using current D params
-                if self.netD.hook_layers:
-                    MSEerr_G = self._recon_loss(rec, rec_feats)
-                else:
-                    MSEerr_G = self.mse_criterion(rec, self.input_x)
-                errG = -errG_fake -errG_adv + opt.gamma * MSEerr_G
-                errG.backward()
-                D_G_z2 = output.data.mean()
-                self.optimizerG.step()
-
+                x_enc = self.encoder(self.input_x)
+                mu = x_enc[0]
+                logvar = x_enc[1]
+                if not torch.isfinite(mu).all() or not torch.isfinite(logvar).all():
+                    self.logger.warning('Skipping batch due to non-finite encoder outputs')
+                    continue
+                logvar = torch.clamp(logvar, min=-10.0, max=10.0)
+                x_enc = [mu, logvar]
                 ############################
-                # (2) Update Encoder network: minimize KL divergence + reconstruction error
+                # (2) Generate samples from noise, and reconstructed samples from encoded real data
                 ###########################
-
-                self.encoder.zero_grad()
-                encoded = self.encoder(self.input_x)
-                mu = encoded[0]
-                logvar = encoded[1]
-                KLD_element = mu.pow(2).add_(logvar.exp()).mul_(-1).add_(1).add_(logvar)
-                KLD_loss = torch.sum(KLD_element).mul_(-0.5)
-                sampled = self.sampler(encoded)
-                rec = self.netG(sampled)
-                if self.netD.hook_layers:
-                    _, rec_feats = self.netD(rec)
-                    MSEerr = self._recon_loss(rec, rec_feats)
-                else:
-                    MSEerr = self.mse_criterion(rec, self.input_x)
-                VAEerr = opt.kld_wt * KLD_loss + MSEerr
+                sampled = self.sampler(x_enc)
+                rec = self.netG(sampled) # ------------------------> Reconstruction
+                ############################
+                # (3) Pass through discriminator
+                rec_output, rec_feats = self.netD(rec)
+                ############################
+                # (4) calculate loss for encoder
+                ############################
+                KLD_element = mu.pow(2) + logvar.exp() - 1 - logvar
+                KLD_loss = -0.5 * torch.sum(KLD_element)
+                Disllike_loss = self._recon_loss(rec, rec_feats)
+                VAEerr = opt.kld_wt * KLD_loss + Disllike_loss
                 VAEerr.backward()
                 self.optimizerEnc.step()
+                ############################
+                # (5) Calculate loss for Generator / Decoder
+                ###########################
+                self.netG.zero_grad()
+                self.netD.zero_grad()
+
+                sampled_detached = sampled.detach()
+                rec = self.netG(sampled_detached)
+                self._set_requires_grad(self.netD, False)
+                rec_output, rec_feats = self.netD(rec)
+
+                with torch.no_grad():
+                    self.noise.resize_(batch_size, opt.nz, 1, 1)
+                    self.noise.normal_(0, 1)
+                gen = self.netG(self.noise)
+                gen_output, _ = self.netD(gen)
+
+                label_fake = torch.full_like(gen_output, float(self.fake_label))
+                bce_fake = self.criterion(gen_output, label_fake)
+                label_rec = torch.full_like(rec_output, float(self.fake_label))
+                bce_rec = self.criterion(rec_output, label_rec)
+                Disllike_loss = self._recon_loss(rec, rec_feats)
+                Decerr = - (bce_fake + bce_rec) + opt.gamma * Disllike_loss # (1 - opt.gamma) *
+                Decerr.backward()
+                self.optimizerG.step()
+                #################################
+                # (6) Calculate Loss for Discriminator
+                ###########################
+                self._set_requires_grad(self.netD, True)
+                self.netD.zero_grad()
+                output, _ = self.netD(self.input_x)
+                label_real = torch.full_like(output, float(self.real_label))
+                bce_real = self.criterion(output, label_real)
+                D_x = output.data.mean()
+                output_fake, _ = self.netD(gen.detach())
+                label_fake = torch.full_like(output_fake, float(self.fake_label))
+                bce_fake = self.criterion(output_fake, label_fake)
+                D_G_z1 = output_fake.data.mean()
+                output_rec, _ = self.netD(rec.detach())
+                label_rec = torch.full_like(output_rec, float(self.fake_label))
+                bce_rec = self.criterion(output_rec, label_rec)
+                D_G_z_rec = output_rec.data.mean()
+                Diserr = bce_real + bce_fake + bce_rec
+                Diserr.backward()
+                self.optimizerD.step()
+                #################################
 
                 if i % 500 == 0:
                     # save generated batch to file
@@ -282,15 +282,15 @@ class Trainer:
                         i,
                         len(dataloader),
                         VAEerr.item(),
-                        errD.item(),
-                        errG.item(),
+                        Diserr.item(),
+                        Decerr.item(),
                         D_x,
                         D_G_z1,
                         D_G_z_rec,
                     )
 
                     if self.prevDLoss is not None and self.prevGLoss is not None:
-                        if errD.item() > self.prevDLoss and abs(errG.item()) > self.prevGLoss:
+                        if Diserr.item() > self.prevDLoss and abs(Decerr.item()) > self.prevGLoss:
                             self.patience -= 1
                             self.logger.info('No improvement in D or G loss, reducing patience to %d', self.patience)
                             if self.patience <= 0:
@@ -298,8 +298,8 @@ class Trainer:
                                 break
                         else:
                             self.patience = opt.stopIter
-                    self.prevDLoss = errD.item()
-                    self.prevGLoss = abs(errG.item())
+                    self.prevDLoss = Diserr.item()
+                    self.prevGLoss = abs(Decerr.item())
 
             if self.patience <= 0:
                 self.logger.info('Early stopping at epoch %d, iteration %d', epoch + 1, i)
