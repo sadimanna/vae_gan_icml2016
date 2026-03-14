@@ -124,20 +124,20 @@ class Discriminator(nn.Module):
         n = int(n)
         # Architecture per VAE-GAN figure (5x5 convs, stride 2, BNorm, ReLU)
         self.main = nn.Sequential(
-            nn.Conv2d(nc, 32, 5, 2, 2, bias=False),
+            nn.Conv2d(nc, 32, kernel_size = 5, stride = 1, padding = 2, bias=False),
             nn.ReLU(inplace=False),
-            nn.Conv2d(32, 128, 5, 2, 2, bias=False),
+            nn.Conv2d(32, 128, kernel_size = 5, stride = 2, padding = 2, bias=False),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=False),
-            nn.Conv2d(128, 256, 5, 2, 2, bias=False),
+            nn.Conv2d(128, 256, kernel_size = 5, stride = 2, padding = 2, bias=False),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=False),
-            nn.Conv2d(256, 256, 5, 2, 2, bias=False),
+            nn.Conv2d(256, 256, kernel_size = 5, stride = 2, padding = 2, bias=False),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=False),
         )
 
-        spatial = image_size // (2 ** 4)
+        spatial = image_size // (2 ** 3)
         self.classifier = nn.Sequential(
             nn.Linear(256 * spatial * spatial, 512, bias=False),
             nn.BatchNorm1d(512),
@@ -149,8 +149,9 @@ class Discriminator(nn.Module):
         self._hook_handles = []
         self._hooked = {}
         self._hookable_layers = self._build_hookable_layers()
+        print(f"Available hookable layers: {', '.join(self._hookable_layers.keys())}")
         if hook_layers is None:
-            hook_layers = ['conv1']
+            hook_layers = ['conv4']
         self.set_hook_layers(hook_layers)
 
     def _build_hookable_layers(self):

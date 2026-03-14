@@ -35,12 +35,15 @@ def build_parser():
     parser.add_argument('--workers', type=int, help='number of data loading workers', default=2)
     parser.add_argument('--batchSize', type=int, default=64, help='input_x batch size')
     parser.add_argument('--imageSize', type=int, default=64, help='the height / width of the input_x image to network')
-    parser.add_argument('--nz', type=int, default=100, help='size of the latent z vector')
+    parser.add_argument('--nz', type=int, default=128, help='size of the latent z vector')
     parser.add_argument('--ngf', type=int, default=64)
     parser.add_argument('--ndf', type=int, default=64)
     parser.add_argument('--niter', type=int, default=30, help='number of epochs to train for')
     parser.add_argument('--saveInt', type=int, default=10, help='number of epochs between checkpoints')
     parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, default=0.0002')
+    parser.add_argument('--lr_decay_enc', type=float, default=0.85, help='learning rate decay factor for encoder')
+    parser.add_argument('--lr_decay_dec', type=float, default=0.85, help='learning rate decay factor for decoder')
+    parser.add_argument('--lr_decay_dis', type=float, default=0.85, help='learning rate decay factor for discriminator')
     parser.add_argument('--beta1', type=float, default=0.9, help='beta1 for adam. default=0.5')
     parser.add_argument('--cuda', action='store_true', help='enables cuda')
     parser.add_argument('--ngpu', type=int, default=1, help='number of GPUs to use')
@@ -48,12 +51,23 @@ def build_parser():
     parser.add_argument('--netD', default='', help='path to netD (to continue training)')
     parser.add_argument('--outf', default='outputs', help='folder to output images and model checkpoints')
     parser.add_argument('--manualSeed', type=int, help='manual seed')
-    parser.add_argument('--gamma', type=float, default=10, help='weight for reconstruction loss in generator objective')
+    parser.add_argument('--gamma', type=float, default=0.00001, help='weight for reconstruction loss in generator objective')
     parser.add_argument('--kld_wt', type=float, default=0.00025, help='weight for KL divergence loss in encoder objective')
     parser.add_argument('--stopIter', type=int, default=10, help='iteration to stop training if early stopping desired (default is effectively no early stopping)')
-    parser.add_argument('--hook_layers', default='conv1', help='comma-separated discriminator conv layer names for hooks (empty to disable)')
+    parser.add_argument('--hook_layers', nargs='+', type=str, default='conv3', help='comma-separated discriminator conv layer names for hooks (empty to disable)')
     parser.add_argument('--eval_samples', type=int, default=5000, help='number of samples for evaluation metrics (0 to skip)')
+    parser.add_argument('--equillibrium', type=float, default=0.68, help='equilibrium hyperparameter for BEGAN-like training')
+    parser.add_argument('--margin', type=float, default=0.35, help='margin for equillibrium to decide whether to pause generator or discriminator training')
+    parser.add_argument('--decay_equillibrium', type=float, default=1.0, help='equillibrium decay factor')
+    parser.add_argument('--decay_margin', type=float, default=1.0, help='margin decay factor')
+    parser.add_argument('--lambda_mse', type=float, default=1e-6, help='weight for MSE loss in discriminator objective')
+    parser.add_argument('--decay_mse', type=float, default=1.0, help='decay factor for MSE loss weight')
     return parser
+
+
+def format_run_tag(opt):
+    tag = f"nz{opt.nz}_gm{opt.gamma}_kl{opt.kld_wt}_ep{opt.niter}_bs{opt.batchSize}_lr{opt.lr}"
+    return tag.replace('.', 'p')
 
 
 def main():
@@ -62,7 +76,8 @@ def main():
 
     pretty_print_args(opt)
 
-    run_dir = setup_output_dir(opt.outf, run_format='%d:%m:%Y_%H:%M:%S', dataset = opt.dataset)
+    dataset_tag = f"{opt.dataset}_{format_run_tag(opt)}"
+    run_dir = setup_output_dir(opt.outf, run_format='%d:%m:%Y_%H:%M:%S', dataset=dataset_tag)
     print(f"Outputs will be saved in: {os.path.basename(run_dir)}")
     logger = setup_logger(run_dir)
     logger.info(opt)
@@ -104,9 +119,14 @@ def main():
     logger.info(netG)
 
     hook_layers = []
-    raw_hooks = opt.hook_layers.strip()
-    if raw_hooks and raw_hooks.lower() not in ['none', 'null']:
-        hook_layers = [name.strip() for name in raw_hooks.split(',') if name.strip()]
+    logger.info(f"Requested hook layers: {opt.hook_layers}")
+    raw_hooks = opt.hook_layers
+    if isinstance(raw_hooks, (list, tuple)):
+        hook_layers = [str(name).strip() for name in raw_hooks if str(name).strip()]
+    else:
+        raw_hooks = str(raw_hooks).strip()
+        if raw_hooks and raw_hooks.lower() not in ['none', 'null']:
+            hook_layers = [name.strip() for name in raw_hooks.split(',') if name.strip()]
 
     netD = Discriminator(opt.imageSize, opt.ndf, nc, opt.ngpu, hook_layers=hook_layers)
     netD.apply(weights_init)

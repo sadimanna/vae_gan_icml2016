@@ -55,12 +55,12 @@ cd "${BASE_DIR}"
 
 echo "Virtual environment activated successfully."
 
-DATASET="cifar10"
+DATASET="mnist"
 DATAROOT="data"
 OUTDIR="outputs"
 
-GAMMAS=(15 10 5 1)
-KLD_WTS=(0.0001 0.00025 0.0005 0.001 0.0025 0.005 0.01)
+GAMMAS=(0.000001 0.00001 0.0001 0.001 0.01 0.1) # 15 10 5 1)
+KLD_WTS=(0.00001 0.00005 0.0001 0.00025 0.0005 0.001 0.0025 0.005 0.01)
 
 for gamma in "${GAMMAS[@]}"; do
   for kld in "${KLD_WTS[@]}"; do
@@ -72,9 +72,11 @@ for gamma in "${GAMMAS[@]}"; do
       --gamma "${gamma}" \
       --kld_wt "${kld}" \
       --cuda \
+      --lr 0.0001 \
       --imageSize 64 \
       --batchSize 64 \
-      --niter 50 \
-      --eval_samples 5000
+      --niter 10 \
+      --eval_samples 1000 \
+      --hook_layers 'conv4'
   done
 done

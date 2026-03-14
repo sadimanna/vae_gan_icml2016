@@ -16,7 +16,6 @@ except Exception:
     StructuralSimilarityIndexMeasure = None
     _TORCHMETRICS_AVAILABLE = False
 
-
 class Trainer:
     def __init__(self, opt, encoder, sampler, netG, netD, logger):
         self.opt = opt
@@ -168,7 +167,12 @@ class Trainer:
 
     def train(self, dataloader):
         opt = self.opt
+        train_dec = True
+        train_dis = True
         torch.autograd.set_detect_anomaly(True)
+        collapse_patience = 10
+        self.patience = collapse_patience
+        collapse = False
         for epoch in range(opt.niter):
             for i, data in enumerate(dataloader, 0):
                 self.encoder.zero_grad()
@@ -189,12 +193,14 @@ class Trainer:
                 if not torch.isfinite(mu).all() or not torch.isfinite(logvar).all():
                     self.logger.warning('Skipping batch due to non-finite encoder outputs')
                     continue
-                logvar = torch.clamp(logvar, min=-10.0, max=10.0)
+                # logvar = torch.clamp(logvar, min=-10.0, max=10.0)
                 x_enc = [mu, logvar]
                 ############################
                 # (2) Generate samples from noise, and reconstructed samples from encoded real data
                 ###########################
                 sampled = self.sampler(x_enc)
+                # self._set_requires_grad(self.netG, False)
+                # self._set_requires_grad(self.netD, False)
                 rec = self.netG(sampled) # ------------------------> Reconstruction
                 ############################
                 # (3) Pass through discriminator
@@ -202,8 +208,8 @@ class Trainer:
                 ############################
                 # (4) calculate loss for encoder
                 ############################
-                KLD_element = mu.pow(2) + logvar.exp() - 1 - logvar
-                KLD_loss = -0.5 * torch.sum(KLD_element)
+                KLD_element = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
+                KLD_loss = torch.sum(KLD_element)
                 Disllike_loss = self._recon_loss(rec, rec_feats)
                 VAEerr = opt.kld_wt * KLD_loss + Disllike_loss
                 VAEerr.backward()
@@ -213,11 +219,12 @@ class Trainer:
                 ###########################
                 self.netG.zero_grad()
                 self.netD.zero_grad()
-
+                # self._set_requires_grad(self.netG, True)
                 sampled_detached = sampled.detach()
                 rec = self.netG(sampled_detached)
-                self._set_requires_grad(self.netD, False)
+                # self._set_requires_grad(self.netD, False)
                 rec_output, rec_feats = self.netD(rec)
+                # self.logger.info(f"Reconstruction outputs | {rec_feats is None}")
 
                 with torch.no_grad():
                     self.noise.resize_(batch_size, opt.nz, 1, 1)
@@ -225,38 +232,70 @@ class Trainer:
                 gen = self.netG(self.noise)
                 gen_output, _ = self.netD(gen)
 
-                label_fake = torch.full_like(gen_output, float(self.fake_label))
-                bce_fake = self.criterion(gen_output, label_fake)
-                label_rec = torch.full_like(rec_output, float(self.fake_label))
+                label_gen = torch.full_like(gen_output, float(self.real_label))
+                bce_gen = self.criterion(gen_output, label_gen)
+                label_rec = torch.full_like(rec_output, float(self.real_label))
                 bce_rec = self.criterion(rec_output, label_rec)
                 Disllike_loss = self._recon_loss(rec, rec_feats)
-                Decerr = - (bce_fake + bce_rec) + opt.gamma * Disllike_loss # (1 - opt.gamma) *
-                Decerr.backward()
-                self.optimizerG.step()
+                Decerr = bce_gen + bce_rec + opt.gamma * Disllike_loss # (1 - opt.gamma) *
+                # Decerr.backward()
+                # self.optimizerG.step()
                 #################################
                 # (6) Calculate Loss for Discriminator
                 ###########################
-                self._set_requires_grad(self.netD, True)
+                # self._set_requires_grad(self.netD, True)
                 self.netD.zero_grad()
                 output, _ = self.netD(self.input_x)
                 label_real = torch.full_like(output, float(self.real_label))
                 bce_real = self.criterion(output, label_real)
                 D_x = output.data.mean()
+                ############################
                 output_fake, _ = self.netD(gen.detach())
                 label_fake = torch.full_like(output_fake, float(self.fake_label))
                 bce_fake = self.criterion(output_fake, label_fake)
                 D_G_z1 = output_fake.data.mean()
+                ############################
                 output_rec, _ = self.netD(rec.detach())
                 label_rec = torch.full_like(output_rec, float(self.fake_label))
                 bce_rec = self.criterion(output_rec, label_rec)
                 D_G_z_rec = output_rec.data.mean()
+                ############################
                 Diserr = bce_real + bce_fake + bce_rec
-                Diserr.backward()
-                self.optimizerD.step()
+                # Diserr.backward()
+                # self.optimizerD.step()
                 #################################
-
+                # selectively disable the decoder or the discriminator if they are unbalanced
+                #################################
+                if torch.mean(bce_real).item() < (opt.equillibrium - opt.margin) \
+                    or torch.mean(bce_rec).item() < (opt.equillibrium - opt.margin):
+                    train_dis = False
+                if torch.mean(bce_real).item() > (opt.equillibrium + opt.margin) \
+                    or torch.mean(bce_rec).item() > (opt.equillibrium + opt.margin):
+                    train_dec = False
+                if train_dec is False and train_dis is False:
+                    train_dis = True
+                    train_dec = True
+                #############################
+                if train_dec:
+                    Decerr.backward()
+                    self.optimizerG.step()
+                    self.netD.zero_grad()
+                if train_dis:
+                    Diserr.backward()
+                    self.optimizerD.step()
+                #############################
+                opt.margin *= opt.decay_margin
+                opt.equillibrium *= opt.decay_equillibrium
+                # margin non puo essere piu alto di equillibrium
+                if opt.margin > opt.equillibrium:
+                    opt.equillibrium = opt.margin
+                opt.lambda_mse *= opt.decay_mse
+                if opt.lambda_mse > 1:
+                    opt.lambda_mse=1
+                #############################
                 if i % 500 == 0:
                     # save generated batch to file
+                    self.logger.info(f"Encoder outputs | mu: {mu.mean().item():.4f} ± {mu.std().item():.4f}, logvar: {logvar.mean().item():.4f} ± {logvar.std().item():.4f}")
                     vutils.save_image(
                         self._normalize_to_01(gen),
                         os.path.join(opt.outf, 'gen_epoch%d_iter%d.png' % (epoch, i)),
@@ -289,20 +328,33 @@ class Trainer:
                         D_G_z_rec,
                     )
 
-                    if self.prevDLoss is not None and self.prevGLoss is not None:
-                        if Diserr.item() > self.prevDLoss and abs(Decerr.item()) > self.prevGLoss:
-                            self.patience -= 1
-                            self.logger.info('No improvement in D or G loss, reducing patience to %d', self.patience)
-                            if self.patience <= 0:
-                                self.logger.info('Early stopping at epoch %d, iteration %d', epoch + 1, i)
-                                break
-                        else:
-                            self.patience = opt.stopIter
-                    self.prevDLoss = Diserr.item()
-                    self.prevGLoss = abs(Decerr.item())
+                if i == len(dataloader) - 1:
+                    mu_mean = mu.mean().abs().item()
+                    mu_var = mu.var(unbiased=False).item()
+                    logvar_mean = logvar.mean().abs().item()
+                    logvar_var = logvar.var(unbiased=False).item()
+                    if (
+                        mu_mean < 1e-4
+                        and mu_var < 1e-4
+                        and logvar_mean < 1e-4
+                        and logvar_var < 1e-4
+                    ):
+                        self.patience -= 1
+                        self.logger.info(
+                            'Encoder collapse suspected (mean/var < 1e-4). Patience: %d',
+                            self.patience,
+                        )
+                        if self.patience < 0:
+                            self.logger.info(
+                                'Stopping due to encoder collapse at epoch %d',
+                                epoch + 1,
+                            )
+                            collapse = True
+                            break
+                    else:
+                        self.patience = collapse_patience
 
-            if self.patience <= 0:
-                self.logger.info('Early stopping at epoch %d, iteration %d', epoch + 1, i)
+            if collapse:
                 break
 
             if (epoch + 1) % opt.saveInt == 0 and epoch != 0:
