@@ -58,7 +58,7 @@ class Trainer:
         # self.optimizerD = optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
         # self.optimizerEnc = optim.Adam(self.encoder.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
         # self.optimizerG = optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-        self.optimizerD = optim.RMSprop(self.netD.parameters(), lr=opt.lr)
+        self.optimizerD = optim.RMSprop(self.netD.parameters(), lr=opt.lr / 2)
         self.optimizerG = optim.RMSprop(self.netG.parameters(), lr=opt.lr)
         self.optimizerEnc = optim.RMSprop(self.encoder.parameters(), lr=opt.lr)
 
@@ -187,6 +187,8 @@ class Trainer:
                 ############################
                 # (1) Encoder first
                 ###########################
+                self._set_requires_grad(self.netG, False)
+                self._set_requires_grad(self.netD, False)
                 x_enc = self.encoder(self.input_x)
                 mu = x_enc[0]
                 logvar = x_enc[1]
@@ -199,8 +201,6 @@ class Trainer:
                 # (2) Generate samples from noise, and reconstructed samples from encoded real data
                 ###########################
                 sampled = self.sampler(x_enc)
-                # self._set_requires_grad(self.netG, False)
-                # self._set_requires_grad(self.netD, False)
                 rec = self.netG(sampled) # ------------------------> Reconstruction
                 ############################
                 # (3) Pass through discriminator
@@ -209,11 +209,13 @@ class Trainer:
                 # (4) calculate loss for encoder
                 ############################
                 KLD_element = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
-                KLD_loss = torch.sum(KLD_element)
+                KLD_loss = torch.mean(KLD_element) # torch.sum(KLD_element) previously 
                 Disllike_loss = self._recon_loss(rec, rec_feats)
                 VAEerr = opt.kld_wt * KLD_loss + Disllike_loss
                 VAEerr.backward()
                 self.optimizerEnc.step()
+                self._set_requires_grad(self.netG, True)
+                self._set_requires_grad(self.netD, True)
                 ############################
                 # (5) Calculate loss for Generator / Decoder
                 ###########################
@@ -222,7 +224,7 @@ class Trainer:
                 # self._set_requires_grad(self.netG, True)
                 sampled_detached = sampled.detach()
                 rec = self.netG(sampled_detached)
-                # self._set_requires_grad(self.netD, False)
+                self._set_requires_grad(self.netD, False)
                 rec_output, rec_feats = self.netD(rec)
                 # self.logger.info(f"Reconstruction outputs | {rec_feats is None}")
 
@@ -243,7 +245,7 @@ class Trainer:
                 #################################
                 # (6) Calculate Loss for Discriminator
                 ###########################
-                # self._set_requires_grad(self.netD, True)
+                self._set_requires_grad(self.netD, True)
                 self.netD.zero_grad()
                 output, _ = self.netD(self.input_x)
                 label_real = torch.full_like(output, float(self.real_label))
