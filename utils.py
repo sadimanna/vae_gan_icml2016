@@ -2,6 +2,7 @@ import datetime
 import logging
 import os
 import random
+import sys
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -28,14 +29,21 @@ def setup_output_dir(base_outf, run_format=None, dataset=None):
 
 
 def setup_logger(run_dir):
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("vae_gan")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
-    logfile = os.path.join(run_dir, 'run.log')
-    file_handler = logging.FileHandler(logfile)
-    formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    if not logger.handlers:
+        formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
+
+        stream_handler = logging.StreamHandler(stream=sys.stdout)
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+
+        logfile = os.path.join(run_dir, 'run.log')
+        file_handler = logging.FileHandler(logfile)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
     return logger
 

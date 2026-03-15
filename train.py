@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision.utils as vutils
 from torch.autograd import Variable
+from math import ceil
 
 try:
     from torchmetrics.image.fid import FrechetInceptionDistance
@@ -54,17 +55,35 @@ class Trainer:
         self.noise = Variable(self.noise)
         self.fixed_noise = Variable(self.fixed_noise)
 
-        # setup optimizers: separate for encoder and generator
+        # setup optimizers: separate for encoder, generator, discriminator
         # self.optimizerD = optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
         # self.optimizerEnc = optim.Adam(self.encoder.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
         # self.optimizerG = optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-        self.optimizerD = optim.RMSprop(self.netD.parameters(), lr=opt.lr / 2)
-        self.optimizerG = optim.RMSprop(self.netG.parameters(), lr=opt.lr)
-        self.optimizerEnc = optim.RMSprop(self.encoder.parameters(), lr=opt.lr)
+        self.optimizerD = optim.RMSprop(self.netD.parameters(), lr=opt.lr_dis)
+        self.optimizerG = optim.RMSprop(self.netG.parameters(), lr=opt.lr_dec)
+        self.optimizerEnc = optim.RMSprop(self.encoder.parameters(), lr=opt.lr_enc)
+
+        self.schedulerD = optim.lr_scheduler.ExponentialLR(self.optimizerD, gamma=opt.lr_decay_dis)
+        self.schedulerG = optim.lr_scheduler.ExponentialLR(self.optimizerG, gamma=opt.lr_decay_dec)
+        self.schedulerEnc = optim.lr_scheduler.ExponentialLR(self.optimizerEnc, gamma=opt.lr_decay_enc)
 
         self.patience = opt.stopIter
         self.prevDLoss = None
         self.prevGLoss = None
+        self.loss_history = {
+            "step": [],
+            "epoch": [],
+            "vae_total": [],
+            "kld": [],
+            "recon": [],
+            "dec_total": [],
+            "bce_gen": [],
+            "bce_rec_dec": [],
+            "dis_total": [],
+            "bce_real": [],
+            "bce_fake": [],
+            "bce_rec_dis": [],
+        }
 
     def _feature_mse(self, feats_a, feats_b):
         losses = []
@@ -110,12 +129,12 @@ class Trainer:
         eval_samples = int(getattr(opt, 'eval_samples', 0))
         if eval_samples <= 0:
             self.logger.info('Skipping evaluation: eval_samples <= 0')
-            return
+            return {"status": "skipped", "reason": "eval_samples <= 0"}
 
         metrics = self._build_metrics()
         if metrics is None:
             self.logger.warning('Skipping evaluation: torchmetrics not available')
-            return
+            return {"status": "skipped", "reason": "torchmetrics not available"}
 
         fid, ssim, lpips = metrics
 
@@ -164,6 +183,121 @@ class Trainer:
             ssim_score,
             lpips_score,
         )
+        return {
+            "status": "ok",
+            "eval_samples": seen,
+            "fid": fid_score,
+            "ssim": ssim_score,
+            "lpips": lpips_score,
+        }
+
+    def _step_schedulers(self):
+        self.schedulerEnc.step()
+        self.schedulerG.step()
+        self.schedulerD.step()
+        lrs = (
+            self.optimizerEnc.param_groups[0]["lr"],
+            self.optimizerG.param_groups[0]["lr"],
+            self.optimizerD.param_groups[0]["lr"],
+        )
+        self.logger.info(
+            "LRs after decay | enc: %.6g | dec: %.6g | dis: %.6g",
+            lrs[0],
+            lrs[1],
+            lrs[2],
+        )
+
+    def _record_losses(
+        self,
+        epoch,
+        step,
+        vae_total,
+        kld,
+        recon,
+        dec_total,
+        bce_gen,
+        bce_rec_dec,
+        dis_total,
+        bce_real,
+        bce_fake,
+        bce_rec_dis,
+    ):
+        self.loss_history["step"].append(step)
+        self.loss_history["epoch"].append(epoch)
+        self.loss_history["vae_total"].append(float(vae_total))
+        self.loss_history["kld"].append(float(kld))
+        self.loss_history["recon"].append(float(recon))
+        self.loss_history["dec_total"].append(float(dec_total))
+        self.loss_history["bce_gen"].append(float(bce_gen))
+        self.loss_history["bce_rec_dec"].append(float(bce_rec_dec))
+        self.loss_history["dis_total"].append(float(dis_total))
+        self.loss_history["bce_real"].append(float(bce_real))
+        self.loss_history["bce_fake"].append(float(bce_fake))
+        self.loss_history["bce_rec_dis"].append(float(bce_rec_dis))
+
+    def _plot_losses(self):
+        if not self.loss_history["step"]:
+            self.logger.warning("No loss history to plot.")
+            return
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            self.logger.warning("Skipping loss plots: matplotlib not available (%s)", exc)
+            return
+
+        try:
+            import seaborn as sns
+            sns.set_theme(style="whitegrid")
+        except Exception:
+            pass
+
+        labels = {
+            "vae_total": "VAE Total (kld_wt*KLD + recon)",
+            "kld": "KLD Loss",
+            "recon": "Reconstruction Loss",
+            "dec_total": "Decoder Total (bce_gen + bce_rec + gamma*recon)",
+            "bce_gen": "BCE Gen",
+            "bce_rec_dec": "BCE Rec (Decoder)",
+            "dis_total": "Discriminator Total (bce_real + bce_fake + bce_rec)",
+            "bce_real": "BCE Real",
+            "bce_fake": "BCE Fake",
+            "bce_rec_dis": "BCE Rec (Discriminator)",
+        }
+
+        keys = [k for k in self.loss_history.keys() if k not in ("step", "epoch")]
+        ncols = 2
+        nrows = ceil(len(keys) / ncols)
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(14, 3.2 * nrows), squeeze=False)
+        steps = self.loss_history["step"]
+
+        for idx, key in enumerate(keys):
+            r = idx // ncols
+            c = idx % ncols
+            ax = axes[r][c]
+            ax.plot(steps, self.loss_history[key], linewidth=1.6)
+            ax.set_title(labels.get(key, key))
+            ax.set_xlabel("Training step")
+            ax.set_ylabel("Loss")
+            ax.grid(True, alpha=0.3)
+            ax.ticklabel_format(style="plain", axis="x")
+
+        # Hide any empty subplots
+        for idx in range(len(keys), nrows * ncols):
+            r = idx // ncols
+            c = idx % ncols
+            axes[r][c].axis("off")
+
+        model_name = "VAE-GAN"
+        dataset = getattr(self.opt, "dataset", "unknown")
+        fig.suptitle(f"{model_name} Loss Curves | dataset={dataset}", fontsize=14)
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+        out_path = os.path.join(self.opt.outf, "loss_curves.png")
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        self.logger.info("Saved loss curves to %s", out_path)
 
     def train(self, dataloader):
         opt = self.opt
@@ -237,9 +371,9 @@ class Trainer:
                 label_gen = torch.full_like(gen_output, float(self.real_label))
                 bce_gen = self.criterion(gen_output, label_gen)
                 label_rec = torch.full_like(rec_output, float(self.real_label))
-                bce_rec = self.criterion(rec_output, label_rec)
+                bce_rec_dec = self.criterion(rec_output, label_rec)
                 Disllike_loss = self._recon_loss(rec, rec_feats)
-                Decerr = bce_gen + bce_rec + opt.gamma * Disllike_loss # (1 - opt.gamma) *
+                Decerr = bce_gen + bce_rec_dec + opt.gamma * Disllike_loss # (1 - opt.gamma) *
                 # Decerr.backward()
                 # self.optimizerG.step()
                 #################################
@@ -259,10 +393,10 @@ class Trainer:
                 ############################
                 output_rec, _ = self.netD(rec.detach())
                 label_rec = torch.full_like(output_rec, float(self.fake_label))
-                bce_rec = self.criterion(output_rec, label_rec)
+                bce_rec_dis = self.criterion(output_rec, label_rec)
                 D_G_z_rec = output_rec.data.mean()
                 ############################
-                Diserr = bce_real + bce_fake + bce_rec
+                Diserr = bce_real + bce_fake + bce_rec_dis
                 # Diserr.backward()
                 # self.optimizerD.step()
                 #################################
@@ -286,6 +420,22 @@ class Trainer:
                     Diserr.backward()
                     self.optimizerD.step()
                 #############################
+                global_step = epoch * len(dataloader) + i
+                self._record_losses(
+                    epoch=epoch + 1,
+                    step=global_step,
+                    vae_total=VAEerr.item(),
+                    kld=KLD_loss.item(),
+                    recon=Disllike_loss.item(),
+                    dec_total=Decerr.item(),
+                    bce_gen=bce_gen.item(),
+                    bce_rec_dec=bce_rec_dec.item(),
+                    dis_total=Diserr.item(),
+                    bce_real=bce_real.item(),
+                    bce_fake=bce_fake.item(),
+                    bce_rec_dis=bce_rec_dis.item(),
+                )
+
                 opt.margin *= opt.decay_margin
                 opt.equillibrium *= opt.decay_equillibrium
                 # margin non puo essere piu alto di equillibrium
@@ -364,4 +514,8 @@ class Trainer:
                 torch.save(self.netD.state_dict(), '%s/netD_epoch_%d.pth' % (opt.outf, epoch + 1))
                 torch.save(self.encoder.state_dict(), '%s/encoder_epoch_%d.pth' % (opt.outf, epoch + 1))
 
-        self.evaluate(dataloader)
+            self._step_schedulers()
+
+        self._plot_losses()
+        self.last_eval_metrics = self.evaluate(dataloader)
+        return self.last_eval_metrics

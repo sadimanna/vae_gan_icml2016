@@ -59,8 +59,8 @@ DATASET="mnist"
 DATAROOT="data"
 OUTDIR="outputs"
 
-GAMMAS=(0.000001 0.00001 0.0001 0.001 0.01 0.1) # 15 10 5 1)
-KLD_WTS=(0.00001 0.00005 0.0001 0.00025 0.0005 0.001 0.0025 0.005 0.01)
+GAMMAS=(0.000001 0.00001 0.0001 0.001 0.01 0.1 1.0) # 15 10 5 1)
+KLD_WTS=(0.00001 0.00005 0.00025 0.0005 0.001 0.005 0.01 0.1 1.0)
 
 for gamma in "${GAMMAS[@]}"; do
   for kld in "${KLD_WTS[@]}"; do
@@ -77,6 +77,73 @@ for gamma in "${GAMMAS[@]}"; do
       --batchSize 64 \
       --niter 10 \
       --eval_samples 1000 \
-      --hook_layers 'conv4'
+      --hook_layers 'conv4' \
+      --nz 16
   done
 done
+
+SUMMARY_FILE="slurm_logs/summary_${SLURM_JOB_ID}.tsv"
+export SUMMARY_FILE
+
+python - <<'PY'
+import glob
+import json
+import os
+
+root = "outputs"
+summary_path = os.environ.get("SUMMARY_FILE", "slurm_logs/summary.tsv")
+records = []
+
+for path in sorted(glob.glob(os.path.join(root, "run_*", "metrics.json"))):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    rec = {"run_dir": os.path.basename(os.path.dirname(path))}
+    rec.update(data.get("hyperparams", {}))
+    rec.update(data.get("metrics", {}))
+    rec["status"] = data.get("status", "")
+    records.append(rec)
+
+if not records:
+    print("No metrics.json files found in outputs/run_*/")
+    raise SystemExit(0)
+
+columns = [
+    "run_dir",
+    "status",
+    "dataset",
+    "imageSize",
+    "batchSize",
+    "nz",
+    "gamma",
+    "kld_wt",
+    "niter",
+    "lr_enc",
+    "lr_dec",
+    "lr_dis",
+    "lr_decay_enc",
+    "lr_decay_dec",
+    "lr_decay_dis",
+    "eval_samples",
+    "fid",
+    "ssim",
+    "lpips",
+]
+
+def _fmt(value):
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+with open(summary_path, "w", encoding="utf-8") as f:
+    f.write("\t".join(columns) + "\n")
+    for rec in records:
+        row = [_fmt(rec.get(col, "")) for col in columns]
+        f.write("\t".join(row) + "\n")
+
+print(f"Summary written to {summary_path}")
+print("\t".join(columns))
+for rec in records:
+    print("\t".join(_fmt(rec.get(col, "")) for col in columns))
+PY

@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import argparse
+import json
 import os
 import torch
 
@@ -40,10 +41,13 @@ def build_parser():
     parser.add_argument('--ndf', type=int, default=64)
     parser.add_argument('--niter', type=int, default=30, help='number of epochs to train for')
     parser.add_argument('--saveInt', type=int, default=10, help='number of epochs between checkpoints')
-    parser.add_argument('--lr', type=float, default=0.0002, help='learning rate, default=0.0002')
-    parser.add_argument('--lr_decay_enc', type=float, default=0.85, help='learning rate decay factor for encoder')
-    parser.add_argument('--lr_decay_dec', type=float, default=0.85, help='learning rate decay factor for decoder')
-    parser.add_argument('--lr_decay_dis', type=float, default=0.85, help='learning rate decay factor for discriminator')
+    parser.add_argument('--lr', type=float, default=0.0002, help='base learning rate (used if lr_* not set)')
+    parser.add_argument('--lr_enc', type=float, default=None, help='learning rate for encoder (defaults to --lr)')
+    parser.add_argument('--lr_dec', type=float, default=None, help='learning rate for decoder/generator (defaults to --lr)')
+    parser.add_argument('--lr_dis', type=float, default=None, help='learning rate for discriminator (defaults to --lr/2)')
+    parser.add_argument('--lr_decay_enc', type=float, default=0.9, help='learning rate decay factor for encoder')
+    parser.add_argument('--lr_decay_dec', type=float, default=0.9, help='learning rate decay factor for decoder')
+    parser.add_argument('--lr_decay_dis', type=float, default=0.95, help='learning rate decay factor for discriminator')
     parser.add_argument('--beta1', type=float, default=0.9, help='beta1 for adam. default=0.5')
     parser.add_argument('--cuda', action='store_true', help='enables cuda')
     parser.add_argument('--ngpu', type=int, default=1, help='number of GPUs to use')
@@ -73,6 +77,13 @@ def format_run_tag(opt):
 def main():
     parser = build_parser()
     opt = parser.parse_args()
+
+    if opt.lr_enc is None:
+        opt.lr_enc = opt.lr
+    if opt.lr_dec is None:
+        opt.lr_dec = opt.lr
+    if opt.lr_dis is None:
+        opt.lr_dis = opt.lr * 0.5
 
     pretty_print_args(opt)
 
@@ -109,7 +120,9 @@ def main():
 
     nc = 3
     encoder = Encoder(opt.imageSize, opt.nz, opt.ngf, nc)
+    logger.info(Encoder)
     sampler = Sampler()
+    logger.info(Sampler)
     netG = Generator(opt.nz, opt.ngf, nc, opt.ngpu, image_size=opt.imageSize)
 
     encoder.apply(weights_init)
@@ -135,7 +148,33 @@ def main():
     logger.info(netD)
 
     trainer = Trainer(opt, encoder, sampler, netG, netD, logger)
-    trainer.train(dataloader)
+    metrics = trainer.train(dataloader)
+
+    summary = {
+        "status": "ok" if metrics and metrics.get("status") == "ok" else "skipped",
+        "hyperparams": {
+            "dataset": opt.dataset,
+            "dataroot": opt.dataroot,
+            "imageSize": opt.imageSize,
+            "batchSize": opt.batchSize,
+            "nz": opt.nz,
+            "gamma": opt.gamma,
+            "kld_wt": opt.kld_wt,
+            "niter": opt.niter,
+            "lr_enc": opt.lr_enc,
+            "lr_dec": opt.lr_dec,
+            "lr_dis": opt.lr_dis,
+            "lr_decay_enc": opt.lr_decay_enc,
+            "lr_decay_dec": opt.lr_decay_dec,
+            "lr_decay_dis": opt.lr_decay_dis,
+        },
+        "metrics": metrics if metrics else {},
+    }
+
+    summary_path = os.path.join(run_dir, "metrics.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, sort_keys=True)
+    logger.info("Wrote run summary to %s", summary_path)
 
 
 if __name__ == '__main__':
