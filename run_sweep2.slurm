@@ -57,12 +57,12 @@ echo "Virtual environment activated successfully."
 
 DATASET="mnist"
 DATAROOT="data"
-OUTDIR="outputs_no_dgex_dec_addedeqmargin"
+OUTDIR="outputs_addedeqmargin"
 export OUTDIR
 export DATASET
 
 GAMMAS=(0.000001 0.00001 0.0001 0.001 0.01 0.1 1.0) # 15 10 5 1)
-KLD_WTS=(0.00001 0.00005 0.00025 0.0005 0.001 0.005 0.01 0.1 1.0)
+KLD_WTS=(0.00001 0.0001 0.001 0.01) #0.00005 0.00025 0.0005 0.001 0.005 0.01 0.1 1.0)
 
 for gamma in "${GAMMAS[@]}"; do
   for kld in "${KLD_WTS[@]}"; do
@@ -77,10 +77,11 @@ for gamma in "${GAMMAS[@]}"; do
       --lr 0.0001 \
       --imageSize 64 \
       --batchSize 64 \
-      --niter 10 \
-      --eval_samples 1000 \
+      --niter 5 \
+      --eval_samples 100 \
       --hook_layers 'conv4' \
-      --nz 16
+      --nz 16 \
+      --equillibrium 0.69 --margin 0.15
   done
 done
 

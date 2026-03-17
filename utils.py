@@ -6,6 +6,7 @@ import sys
 
 import torch
 import torch.backends.cudnn as cudnn
+from torch.optim.lr_scheduler import _LRScheduler
 
 
 def setup_output_dir(base_outf, run_format=None, dataset=None):
@@ -58,3 +59,29 @@ def set_seed(opt, logger):
         torch.cuda.manual_seed_all(opt.manualSeed)
 
     cudnn.benchmark = True
+
+
+class CosineWarmupLR(_LRScheduler):
+    def __init__(self, optimizer, warmup_steps, total_steps, min_lr=0.0, last_epoch=-1):
+        if warmup_steps < 0:
+            raise ValueError("warmup_steps must be >= 0")
+        if total_steps <= 0:
+            raise ValueError("total_steps must be > 0")
+        self.warmup_steps = int(warmup_steps)
+        self.total_steps = int(total_steps)
+        self.min_lr = float(min_lr)
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        step = self.last_epoch + 1
+        lrs = []
+        for base_lr in self.base_lrs:
+            if self.warmup_steps > 0 and step <= self.warmup_steps:
+                lr = base_lr * step / float(self.warmup_steps)
+            else:
+                progress = min(max(step - self.warmup_steps, 0), self.total_steps - self.warmup_steps)
+                denom = max(self.total_steps - self.warmup_steps, 1)
+                cosine = 0.5 * (1.0 + torch.cos(torch.tensor(progress / denom * 3.141592653589793)))
+                lr = self.min_lr + (base_lr - self.min_lr) * cosine.item()
+            lrs.append(lr)
+        return lrs

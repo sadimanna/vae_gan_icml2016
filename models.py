@@ -90,10 +90,10 @@ class Generator(nn.Module):
             nn.ConvTranspose2d(256, 128, 5, 2, 2, output_padding=1, bias=False),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=False),
-            nn.ConvTranspose2d(128, 32, 5, 2, 2, output_padding=1, bias=False),
-            nn.BatchNorm2d(32),
+            nn.ConvTranspose2d(128, 64, 5, 2, 2, output_padding=1, bias=False),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=False),
-            nn.Conv2d(32, nc, 5, 1, 2, bias=False),
+            nn.Conv2d(64, nc, 5, 1, 2, bias=False),
             nn.Tanh(),
         )
 
@@ -118,31 +118,33 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
         self.ngpu = ngpu
         n = math.log2(image_size)
+        multiplier = 2
+        base_channels = 16
 
         assert n == round(n), 'imageSize must be a power of 2'
         assert n >= 3, 'imageSize must be at least 8'
         n = int(n)
         # Architecture per VAE-GAN figure (5x5 convs, stride 2, BNorm, ReLU)
         self.main = nn.Sequential(
-            nn.Conv2d(nc, 32, kernel_size = 5, stride = 1, padding = 2, bias=False),
+            nn.Conv2d(nc, base_channels, kernel_size = 5, stride = 1, padding = 2, bias=False),
             nn.ReLU(inplace=False),
-            nn.Conv2d(32, 128, kernel_size = 5, stride = 2, padding = 2, bias=False),
-            nn.BatchNorm2d(128),
+            nn.Conv2d(base_channels, base_channels * multiplier, kernel_size = 5, stride = 2, padding = 2, bias=False),
+            nn.BatchNorm2d(base_channels * multiplier),
             nn.ReLU(inplace=False),
-            nn.Conv2d(128, 256, kernel_size = 5, stride = 2, padding = 2, bias=False),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(base_channels * multiplier, base_channels * multiplier**2, kernel_size = 5, stride = 2, padding = 2, bias=False),
+            nn.BatchNorm2d(base_channels * multiplier**2),
             nn.ReLU(inplace=False),
-            nn.Conv2d(256, 256, kernel_size = 5, stride = 2, padding = 2, bias=False),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(base_channels * multiplier**2, base_channels * multiplier**3, kernel_size = 5, stride = 2, padding = 2, bias=False),
+            nn.BatchNorm2d(base_channels * multiplier**3),
             nn.ReLU(inplace=False),
         )
 
         spatial = image_size // (2 ** 3)
         self.classifier = nn.Sequential(
-            nn.Linear(256 * spatial * spatial, 512, bias=False),
-            nn.BatchNorm1d(512),
+            nn.Linear(base_channels * multiplier**3 * spatial * spatial, base_channels * multiplier**3, bias=False),
+            nn.BatchNorm1d(base_channels * multiplier**3),
             nn.ReLU(inplace=False),
-            nn.Linear(512, 1),
+            nn.Linear(base_channels * multiplier**3, 1),
             nn.Sigmoid(),
         )
 

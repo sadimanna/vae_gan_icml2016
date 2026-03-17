@@ -56,16 +56,16 @@ class Trainer:
         self.fixed_noise = Variable(self.fixed_noise)
 
         # setup optimizers: separate for encoder, generator, discriminator
-        # self.optimizerD = optim.Adam(self.netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-        # self.optimizerEnc = optim.Adam(self.encoder.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-        # self.optimizerG = optim.Adam(self.netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
-        self.optimizerD = optim.RMSprop(self.netD.parameters(), lr=opt.lr_dis)
-        self.optimizerG = optim.RMSprop(self.netG.parameters(), lr=opt.lr_dec)
-        self.optimizerEnc = optim.RMSprop(self.encoder.parameters(), lr=opt.lr_enc)
+        self.optimizerD = optim.Adam(self.netD.parameters(), lr=opt.lr_dis, betas=(opt.beta1, 0.999))
+        self.optimizerEnc = optim.Adam(self.encoder.parameters(), lr=opt.lr_enc, betas=(opt.beta1, 0.999))
+        self.optimizerG = optim.Adam(self.netG.parameters(), lr=opt.lr_dec, betas=(opt.beta1, 0.999))
+        # self.optimizerD = optim.RMSprop(self.netD.parameters(), lr=opt.lr_dis)
+        # self.optimizerG = optim.RMSprop(self.netG.parameters(), lr=opt.lr_dec)
+        # self.optimizerEnc = optim.RMSprop(self.encoder.parameters(), lr=opt.lr_enc)
 
-        self.schedulerD = optim.lr_scheduler.ExponentialLR(self.optimizerD, gamma=opt.lr_decay_dis)
-        self.schedulerG = optim.lr_scheduler.ExponentialLR(self.optimizerG, gamma=opt.lr_decay_dec)
-        self.schedulerEnc = optim.lr_scheduler.ExponentialLR(self.optimizerEnc, gamma=opt.lr_decay_enc)
+        self.schedulerD = self._build_scheduler(self.optimizerD, opt.lr_decay_dis)
+        self.schedulerG = self._build_scheduler(self.optimizerG, opt.lr_decay_dec)
+        self.schedulerEnc = self._build_scheduler(self.optimizerEnc, opt.lr_decay_enc)
 
         self.patience = opt.stopIter
         self.prevDLoss = None
@@ -92,6 +92,37 @@ class Trainer:
         if len(losses) == 1:
             return losses[0]
         return sum(losses) / len(losses)
+
+    def _build_scheduler(self, optimizer, decay):
+        name = getattr(self.opt, "scheduler", "exponential").lower()
+        total_steps = getattr(self.opt, "scheduler_total_steps", None)
+        if total_steps is None:
+            total_steps = self.opt.niter
+        if name == "none":
+            return None
+        if name == "exponential":
+            return optim.lr_scheduler.ExponentialLR(optimizer, gamma=decay)
+        if name == "linear":
+            return optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.0, total_iters=total_steps)
+        if name == "step":
+            step_size = getattr(self.opt, "scheduler_step_size", None)
+            gamma = getattr(self.opt, "scheduler_gamma", 0.9)
+            if step_size is None:
+                self.logger.info("Defaulting scheduler_step_size to 30%% of total steps")
+                step_size = max(1, int(0.3 * total_steps))
+            return optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+        if name == "cosine":
+            min_lr = getattr(self.opt, "scheduler_min_lr", 0.0)
+            return optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=min_lr)
+        if name in ("cosine_warmup", "cosine-warmup"):
+            from utils import CosineWarmupLR
+            warmup_steps = getattr(self.opt, "scheduler_warmup_steps", None)
+            if warmup_steps is None:
+                self.logger.info("Defaulting scheduler_warmup_steps to 10%% of total steps")
+                warmup_steps = int(0.1*total_steps)
+            min_lr = getattr(self.opt, "scheduler_min_lr", 0.000001)
+            return CosineWarmupLR(optimizer, warmup_steps=warmup_steps, total_steps=total_steps, min_lr=min_lr)
+        raise ValueError(f"Unknown scheduler: {name}")
     
     def _set_requires_grad(self, model, requires_grad):
         for param in model.parameters():
@@ -192,9 +223,12 @@ class Trainer:
         }
 
     def _step_schedulers(self):
-        self.schedulerEnc.step()
-        self.schedulerG.step()
-        self.schedulerD.step()
+        if self.schedulerEnc is not None:
+            self.schedulerEnc.step()
+        if self.schedulerG is not None:
+            self.schedulerG.step()
+        if self.schedulerD is not None:
+            self.schedulerD.step()
         lrs = (
             self.optimizerEnc.param_groups[0]["lr"],
             self.optimizerG.param_groups[0]["lr"],
@@ -373,7 +407,7 @@ class Trainer:
                 label_rec = torch.full_like(rec_output, float(self.real_label))
                 bce_rec_dec = self.criterion(rec_output, label_rec)
                 Disllike_loss = self._recon_loss(rec, rec_feats)
-                Decerr = bce_gen + bce_rec_dec + opt.gamma * Disllike_loss # (1 - opt.gamma) *
+                Decerr = bce_gen + bce_rec_dec + opt.gamma * Disllike_loss # bce_rec_dec
                 # Decerr.backward()
                 # self.optimizerG.step()
                 #################################
@@ -403,10 +437,10 @@ class Trainer:
                 # selectively disable the decoder or the discriminator if they are unbalanced
                 #################################
                 if torch.mean(bce_real).item() < (opt.equillibrium - opt.margin) \
-                    or torch.mean(bce_rec).item() < (opt.equillibrium - opt.margin):
+                    or torch.mean(bce_fake).item() < (opt.equillibrium - opt.margin):
                     train_dis = False
                 if torch.mean(bce_real).item() > (opt.equillibrium + opt.margin) \
-                    or torch.mean(bce_rec).item() > (opt.equillibrium + opt.margin):
+                    or torch.mean(bce_fake).item() > (opt.equillibrium + opt.margin):
                     train_dec = False
                 if train_dec is False and train_dis is False:
                     train_dis = True

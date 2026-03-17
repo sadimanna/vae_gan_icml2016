@@ -1,5 +1,6 @@
 # Large data directories
 outputs/
+outputs_*/
 data/
 slurm_logs/
 cifar-10-batches-py/
